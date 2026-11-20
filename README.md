@@ -18,5 +18,12 @@ powershell tools/check.ps1
 ```
 Docker Desktop has to be running.
 
+## Submission rules (we get 4 an hour; rejected ones count)
+1. Only submit a version that beats the last submitted one in `tools/sim.py --squad` over at least 20 matches with the same seeds, and doesn't get worse in `--ffa`.
+2. It must pass `tools/check.ps1` (both checks) first, so it can't be rejected.
+3. At most 2 submissions an hour. Keep the other 2 as a buffer for fixes.
+4. Group several improvements into one submission instead of submitting each tweak.
+5. Never resubmit a commit that has already been scored. Log every submission in the planning repo's `LOG.md`.
+
 ## Submitting
 The scorer needs a **public** GitHub repo with the Dockerfile at its top. Submit the repo URL on the track page (4 per hour), then log it in the buildathon repo with `tools/log.py`.
