@@ -26,7 +26,7 @@ STRAFE_MIN = float(_os.environ.get("STRAFE_MIN", "0.6"))
 STRAFE_MAX = float(_os.environ.get("STRAFE_MAX", "1.4"))
 STRAFE_GOAL = float(_os.environ.get("STRAFE_GOAL", "0.5"))
 STRAFE_BOOST_E = float(_os.environ.get("STRAFE_BOOST_E", "999"))
-LONE = _os.environ.get("LONE", "1") == "1"
+LONE = _os.environ.get("LONE", "0") == "1"
 BAND = {"near": 35.0, "mid": 110.0, "far": 240.0}
 
 
