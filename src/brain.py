@@ -21,6 +21,12 @@ UPGRADE_ORDER = [
 WEAPON_PREF = {"laser": 3, "lightning": 2, "mortar": 0, "gun": 1}
 LOUD = {"gun": 1.0, "laser": 1.0, "lightning": 1.0, "mortar": 1.0, "explosion": 0.8, "death": 0.6,
         "laser_charge": 1.0, "step": 1.2, "boost": 1.0, "jet": 1.0, "reload": 1.0, "crate": 0.5, "npc_gun": 0.3}
+import os as _os
+STRAFE_MIN = float(_os.environ.get("STRAFE_MIN", "0.6"))
+STRAFE_MAX = float(_os.environ.get("STRAFE_MAX", "1.4"))
+STRAFE_GOAL = float(_os.environ.get("STRAFE_GOAL", "0.5"))
+STRAFE_BOOST_E = float(_os.environ.get("STRAFE_BOOST_E", "999"))
+LONE = _os.environ.get("LONE", "1") == "1"
 BAND = {"near": 35.0, "mid": 110.0, "far": 240.0}
 
 
@@ -56,6 +62,7 @@ class Brain:
         self.scan_t = 0
         self.strafe = 1
         self.strafe_t = 0
+        self.strafe_len = 1.0
         self.laser_hold = False
         self.drops_seen = {}      # id -> pos
         self.mode = "start"
@@ -248,6 +255,10 @@ class Brain:
         mechs = [m for m in obs["mechs"] if m["kind"] == "mech"]
         npcs = [m for m in obs["mechs"] if m["kind"] == "npc"]
         recent_att = {i for i, at in self.attackers.items() if t - at < 4.0}
+        # a fight we are in stays our fight while we can still see them (memory covers 5 s)
+        self.engaged = {i: et for i, et in getattr(self, "engaged", {}).items() if t - et < 12.0}
+        for i in recent_att:
+            self.engaged[i] = t
 
         # ---------------- pick a combat target
         target = None
@@ -255,13 +266,13 @@ class Brain:
             d = dist2(m["pos"], pos)
             mh = m.get("hp", 1400) / max(1.0, m.get("max_hp", 1400))
             score = None
-            if m["id"] in recent_att:
-                score = 100 - d / 10                                   # shoot back
+            if m["id"] in recent_att or m["id"] in self.engaged:
+                score = 100 - d / 10                                   # shoot back, and finish the fight
             elif d < 40:
                 score = 80 - d                                          # it can see us anyway
             elif mh < 0.4 and d < 170 and hpf > 0.6 and len(mechs) <= 2:
                 score = 60 - d / 10 + (1 - mh) * 20                     # vulture
-            elif len(mechs) == 1 and d < 170 and hpf > 0.5:
+            elif LONE and len(mechs) == 1 and d < 170 and hpf > 0.5:
                 # a lone mech facing us or closing in is hunting us: shoot first
                 to_me = math.atan2(pos[1] - m["pos"][1], pos[0] - m["pos"][0])
                 facing = abs(angdiff(m["aim"][0], to_me)) < 0.5
@@ -271,6 +282,8 @@ class Brain:
                     score = 70 - d / 10
             if score is not None and (target is None or score > target[0]):
                 target = (score, m)
+        if target is not None and target[1]["kind"] == "mech":
+            self.engaged[target[1]["id"]] = t
         if target is None:
             for m in npcs:
                 d = dist2(m["pos"], pos)
@@ -338,9 +351,10 @@ class Brain:
             dvec = (target["pos"][0] - pos[0], target["pos"][1] - pos[1])
             dd = math.hypot(*dvec) or 1.0
             perp = (-dvec[1] / dd, dvec[0] / dd)
-            if t - self.strafe_t > self.rng.uniform(0.6, 1.4):
+            if t - self.strafe_t > self.strafe_len:
                 self.strafe = -self.strafe
                 self.strafe_t = t
+                self.strafe_len = self.rng.uniform(STRAFE_MIN, STRAFE_MAX)
             if hpf < 0.35 or len(recent_att) > 1:
                 # break off: back away toward our spot while still facing them
                 away = (-dvec[0] / dd, -dvec[1] / dd)
@@ -349,8 +363,10 @@ class Brain:
                 mag = 1.0
                 boost = me["energy"] > 20
             else:
-                mv = (perp[0] * self.strafe * 0.8 + mv[0] * 0.4, perp[1] * self.strafe * 0.8 + mv[1] * 0.4)
+                keep = STRAFE_GOAL if me["in_zone"] else 0.6
+                mv = (perp[0] * self.strafe + mv[0] * keep, perp[1] * self.strafe + mv[1] * keep)
                 mag = 1.0
+                boost = me["energy"] > STRAFE_BOOST_E
         # dodge charged lasers aimed at us
         for m in mechs:
             if m.get("charging"):

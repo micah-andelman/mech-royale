@@ -24,6 +24,38 @@ from src.brain import Brain  # noqa: E402
 from src.world import World  # noqa: E402
 
 HELLO = None
+BRAIN = Brain
+
+
+def load_brain(spec):
+    """'' = working tree; 'example' = the kit's example bot; anything else = a git revision."""
+    import importlib
+    import shutil
+    import subprocess
+    import types
+    if not spec:
+        return Brain
+    if spec == "example":
+        import mechfight as mf
+        cap = {}
+        real = mf.run
+        mf.run = lambda cls: cap.setdefault("cls", cls)
+        src = open(os.path.join(ROOT, "tools", "example_bot.py")).read()
+        g = {"__name__": "example_bot"}
+        exec(compile(src, "example_bot.py", "exec"), g)
+        mf.run = real
+        return cap["cls"]
+    d = os.path.join(ROOT, "tools", "_rev", spec)
+    pkg = os.path.join(d, "revsrc_" + spec)
+    if not os.path.exists(os.path.join(pkg, "brain.py")):
+        os.makedirs(pkg, exist_ok=True)
+        for f in ("brain.py", "world.py"):
+            txt = subprocess.check_output(["git", "-C", ROOT, "show", f"{spec}:src/{f}"])
+            open(os.path.join(pkg, f), "wb").write(txt)
+        open(os.path.join(pkg, "__init__.py"), "w").close()
+        shutil.copy(os.path.join(ROOT, "src", "grid.bin"), os.path.join(pkg, "grid.bin"))
+    sys.path.insert(0, d)
+    return importlib.import_module("revsrc_" + spec + ".brain").Brain
 
 
 def load_hello():
@@ -59,6 +91,16 @@ class Mech:
         self.cmd = {}
         self.cause = ''
         self.skill_err = 0.03
+        self.vz = 0.0
+        self.slot1 = None
+        self.shots = 0
+        self.hits = 0
+        self.roam = None
+        self.hurt_by_us = -99
+        self.grounded = True
+        self.path = None
+        self.path_goal = None
+        self.stuck_t = 0.0
 
 
 class Sim:
@@ -89,18 +131,25 @@ class Sim:
             rr = self.rng.uniform(0, z["start_radius"] * 0.8)
             p = (z["start_center"][0] + math.cos(ang) * rr, z["start_center"][1] + math.sin(ang) * rr)
             I, J = world.nidx(p[0], p[1])
-            if not world.nfree(I, J) or any(math.dist(p, s) < 100 for s in spots):
+            if not world.nfree(I, J) or any(math.dist(p, s) < cfg['match']['spawn_min_separation'] for s in spots):
                 continue
             spots.append(p)
         hello = dict(HELLO)
         for i, p in enumerate(spots):
             ours = i == 0 or mode == "ffa"
             h = dict(hello, slot=i, seed=self.rng.randrange(1 << 30))
-            b = Brain(h) if ours else None
-            if b is not None:
+            b = BRAIN(h) if ours else None
+            if b is not None and hasattr(b, "w"):
                 b.w = world  # share the loaded grid between copies
             self.mechs.append(Mech(i, (p[0], p[1], world.ground_at(*p)), cfg, b))
         self.bullets = []
+        # floor weapon loot (laser / lightning / mortar, 1:1:1), on open ground
+        self.pickups = []
+        while len(self.pickups) < cfg["loot"]["floor_count"]:
+            p = (self.rng.uniform(world.minx + 40, world.maxx - 40), self.rng.uniform(world.miny + 40, world.maxy - 40))
+            if world.nfree(*world.nidx(p[0], p[1])):
+                self.pickups.append({"id": 8000 + len(self.pickups), "kind": self.rng.choice(["mortar", "laser", "lightning"]),
+                                     "pos": [p[0], p[1], world.ground_at(*p)]})
         self.alive = len(self.mechs)
         # house bot skill: 4 easy, 4 medium, 4 hard, 3 expert (aim noise in radians)
         errs = [0.07] * 4 + [0.045] * 4 + [0.03] * 4 + [0.018] * 3
@@ -109,6 +158,9 @@ class Sim:
             m.skill_err = e
         self.order = [m.id for m in house]       # weakest first
         self.hunters = set(self.order[:1])
+        self.squad_seen_t = -99
+        self.prox = os.environ.get('SIM_PROX', '0') == '1'
+        self.squad_seen_pos = (0.0, 0.0)
 
     def zone(self):
         for ph in self.phases:
@@ -126,6 +178,109 @@ class Sim:
         return ([ph["center"][k] + (ph["next_center"][k] - ph["center"][k]) * f for k in (0, 1)],
                 ph["radius"] + (ph["next_radius"] - ph["radius"]) * f)
 
+    def slot_obs(self, m):
+        w = m.slot1
+        if not w:
+            return None
+        o = {"kind": w["kind"], "cooldown": max(0.0, w["cool"]), "stats": self.cfg["weapons"][w["kind"]]}
+        if w["kind"] == "laser":
+            o["charge"] = w["charge"]
+        return o
+
+    def damage(self, owner, o, dmg, weapon, from_yaw):
+        dmg *= 1 + 0.04 * min(owner.cubes, 10)
+        rear = abs((from_yaw - o.aim[0] + math.pi) % (2 * math.pi) - math.pi) > math.pi / 2
+        if rear:
+            dmg *= 1.5
+        o.hp -= dmg
+        o.cause = f"shot by {owner.id}"
+        if owner.id == 0:
+            o.hurt_by_us = self.t
+        o.last_hurt = self.t
+        owner.last_hurt = self.t
+        owner.hits += 1
+        o.events.append({"type": "damaged", "amount": dmg, "weapon": weapon, "bearing": from_yaw, "by": owner.id, "rear": rear})
+        owner.events.append({"type": "hit", "target": o.id, "amount": dmg, "weapon": weapon})
+
+    def slot1_step(self, m, cmd, dt):
+        cfg = self.cfg
+        t = cmd.get("take")
+        if t is not None:
+            for p in self.pickups:
+                if p["id"] == t and math.dist(p["pos"][:2], m.pos[:2]) <= cfg["loot"]["pickup_radius"]:
+                    if m.slot1 is not None and cmd.get("drop") == 1:
+                        self.pickups.append({"id": 9000 + len(self.pickups), "kind": m.slot1["kind"], "pos": list(m.pos)})
+                        m.slot1 = None
+                    if m.slot1 is None:
+                        self.pickups.remove(p)
+                        k = p["kind"]
+                        m.slot1 = {"kind": k, "cool": max(cfg["loot"]["equip_s"], cfg["weapons"][k]["cooldown"]), "charge": 0.0}
+                    break
+        w = m.slot1
+        if not w:
+            return
+        w["cool"] -= dt
+        fire = cmd.get("fire")
+        held = bool(fire[1]) if isinstance(fire, list) and len(fire) > 1 else False
+        ws = cfg["weapons"][w["kind"]]
+        eye = (m.pos[0], m.pos[1], m.pos[2] + 7)
+        if w["kind"] == "lightning":
+            if held and w["cool"] <= 0 and m.energy >= ws["energy"]:
+                w["cool"] = ws["cooldown"]
+                m.energy -= ws["energy"]
+                m.last_spend = self.t
+                m.shots += 1
+                self.sound(m, "lightning")
+                best = None
+                for o in self.mechs:
+                    if o is m or not o.alive:
+                        continue
+                    d = math.dist(o.pos[:2], m.pos[:2])
+                    b = math.atan2(o.pos[1] - m.pos[1], o.pos[0] - m.pos[0])
+                    if d <= ws["range"] and abs((b - m.aim[0] + math.pi) % (2 * math.pi) - math.pi) <= math.radians(ws["cone_deg"]) / 2                             and self.w.los(eye, (o.pos[0], o.pos[1], o.pos[2] + 4.5), 2.0) and (best is None or d < best[0]):
+                        best = (d, o, b)
+                if best:
+                    self.damage(m, best[1], ws["damage"], "lightning", best[2] + math.pi)
+        elif w["kind"] == "laser":
+            if held and w["cool"] <= 0:
+                w["charge"] = min(ws["charge"] + ws["hold_s"], w["charge"] + dt)
+                if w["charge"] < ws["charge"] + ws["hold_s"]:
+                    return
+            if w["charge"] > 0 and (not held or w["charge"] >= ws["charge"] + ws["hold_s"]):
+                if w["charge"] < ws["min_charge"]:
+                    w["charge"] += dt
+                    return
+                frac = ws["min_frac"] + (1 - ws["min_frac"]) * min(1.0, w["charge"] / ws["charge"])
+                w["charge"] = 0.0
+                w["cool"] = ws["cooldown"]
+                m.shots += 1
+                self.sound(m, "laser")
+                d3 = (math.cos(m.aim[1]) * math.cos(m.aim[0]), math.cos(m.aim[1]) * math.sin(m.aim[0]), math.sin(m.aim[1]))
+                best = None
+                for o in self.mechs:
+                    if o is m or not o.alive:
+                        continue
+                    c = (o.pos[0] - eye[0], o.pos[1] - eye[1], o.pos[2] + 4.5 - eye[2])
+                    along = c[0] * d3[0] + c[1] * d3[1] + c[2] * d3[2]
+                    if along <= 0 or along > ws["range"]:
+                        continue
+                    perp = math.sqrt(max(0.0, c[0] ** 2 + c[1] ** 2 + c[2] ** 2 - along ** 2))
+                    if perp < 2.5 + 2.0 * 0 + 1.0 and self.w.los(eye, (o.pos[0], o.pos[1], o.pos[2] + 4.5), 2.0) and (best is None or along < best[0]):
+                        best = (along, o)
+                if best:
+                    self.damage(m, best[1], ws["damage"] * frac, "laser", m.aim[0] + math.pi)
+
+    def surface(self, x, y, z):
+        g = self.w.ground_at(x, y)
+        t = self.w.solid_top(x, y)
+        if t > g and t <= z + self.cfg["mech"]["step_up"]:
+            return t
+        return g
+
+    def blocked(self, x, y, z):
+        t = self.w.solid_top(x, y)
+        return t > self.w.ground_at(x, y) and t > z + self.cfg["mech"]["step_up"]
+
     def sees(self, a, b):
         d = math.dist(a.pos[:2], b.pos[:2])
         eye = (a.pos[0], a.pos[1], a.pos[2] + 8)
@@ -142,6 +297,10 @@ class Sim:
 
     def sound(self, src, kind):
         rng = self.cfg["sound"]["range"].get(kind, 100)
+        if self.mode == "squad" and src.id == 0 and any(o.alive and math.dist(o.pos[:2], src.pos[:2]) <= rng for o in self.mechs[1:]):
+            # the squad hears us: a rough fix on our position (bearing noise ~7 deg)
+            self.squad_seen_t = self.t
+            self.squad_seen_pos = (src.pos[0] + random.gauss(0, 15), src.pos[1] + random.gauss(0, 15))
         for m in self.mechs:
             if m is src or not m.alive or m.brain is None:
                 continue
@@ -167,12 +326,13 @@ class Sim:
         return {
             "type": "obs", "tick": self.tick, "t": round(self.t, 2), "alive": self.alive,
             "self": {"id": m.id, "pos": m.pos, "vel": m.vel, "aim": m.aim, "hp": m.hp, "max_hp": m.max_hp,
-                     "energy": m.energy, "max_energy": 100, "grounded": True, "cubes": m.cubes, "upgrades": [],
+                     "energy": m.energy, "max_energy": 100, "grounded": m.grounded, "cubes": m.cubes, "upgrades": [],
                      "in_zone": math.dist(m.pos[:2], c) <= r,
                      "weapons": [{"kind": "gun", "cooldown": max(0, m.cool), "ammo": m.ammo, "reload": max(0, m.reload),
-                                  "stats": gun}, None],
+                                  "stats": gun}, self.slot_obs(m)],
                      "stats": dict(self.cfg["mech"])},
-            "mechs": vis, "projectiles": [], "crates": [], "cubes": [], "pickups": [],
+            "mechs": vis, "projectiles": [], "crates": [], "cubes": [], "pickups": [p for p in self.pickups if math.dist(p["pos"][:2], m.pos[:2]) < 90
+                                                                          and self.w.los((m.pos[0], m.pos[1], m.pos[2] + 8), (p["pos"][0], p["pos"][1], p["pos"][2] + 1), 3.0)],
             "sounds": m.sounds, "beams": [], "events": m.events, "drops": [],
             "zone": {k: ph[k] for k in ("center", "radius", "next_center", "next_radius", "shrink_start", "shrink_end", "dps")},
             "offer": None,
@@ -189,30 +349,87 @@ class Sim:
             us = self.mechs[0]
             hunting = m.id in self.hunters or self.t > 300
             shared = any(self.sees(o, us) for o in self.mechs if o.alive and o.brain is None) if us.alive else False
-            vis = [us] if us.alive and (hunting or shared and self.sees(m, us) or math.dist(m.pos, us.pos) < 45) else []
+            provoked = self.t - m.hurt_by_us < 10
+            sees_us = us.alive and self.sees(m, us)
+            vis = [us] if sees_us and (hunting or provoked or (self.prox and math.dist(m.pos, us.pos) < 45)) else []
+            if not vis and hunting and us.alive:
+                # no sight: go where the squad last saw (or heard) us; otherwise sweep toward the circle
+                if self.t - self.squad_seen_t < 30:
+                    goal = self.squad_seen_pos
+                elif m.roam is None or math.dist(m.pos[:2], m.roam) < 10:
+                    ang = random.uniform(0, 2 * math.pi)
+                    rr = random.uniform(0, ph["next_radius"] * 0.8)
+                    m.roam = (ph["next_center"][0] + math.cos(ang) * rr, ph["next_center"][1] + math.sin(ang) * rr)
+                    goal = m.roam
+                else:
+                    goal = m.roam
         else:
             tgts = [o for o in self.mechs if o.alive and o is not m]
             vis = [o for o in tgts if self.sees(m, o)]
         if vis:
             o = min(vis, key=lambda o: math.dist(o.pos, m.pos))
             d = math.dist(o.pos[:2], m.pos[:2])
-            yaw = math.atan2(o.pos[1] - m.pos[1], o.pos[0] - m.pos[0]) + random.gauss(0, m.skill_err)
-            cmd["aim"] = [yaw, 0.0]
-            if d > 60 and (self.mode != "squad" or m.id in self.hunters or self.t > 300):
+            lead = d / self.cfg["weapons"]["gun"]["speed"] if m.skill_err < 0.05 else 0.0
+            tx, ty = o.pos[0] + o.vel[0] * lead, o.pos[1] + o.vel[1] * lead
+            yaw = math.atan2(ty - m.pos[1], tx - m.pos[0]) + random.gauss(0, m.skill_err)
+            pitch = math.atan2(o.pos[2] + 4.5 - (m.pos[2] + 7), max(d, 1.0))
+            cmd["aim"] = [yaw, pitch]
+            if d > 50 and (self.mode != "squad" or m.id in self.hunters or self.t > 300):
                 goal = o.pos[:2]
             cmd["fire"] = d < 200 and self.sees(m, o)
         else:
             cmd["aim"] = [math.atan2(goal[1] - m.pos[1], goal[0] - m.pos[0]), 0.0]
-        dx, dy = goal[0] - m.pos[0], goal[1] - m.pos[1]
-        n = math.hypot(dx, dy) or 1
-        cmd["move"] = [dx / n, dy / n]
+        # stay inside the zone: clamp the goal into the current circle
+        zc, zr = c, r
+        gd = math.dist(goal, zc)
+        if gd > zr * 0.8:
+            f = zr * 0.8 / max(gd, 1e-6)
+            goal = (zc[0] + (goal[0] - zc[0]) * f, zc[1] + (goal[1] - zc[1]) * f)
+        mv = self.house_nav(m, goal)
+        cmd["move"] = list(mv)
+        sp = math.hypot(m.vel[0], m.vel[1])
+        m.stuck_t = m.stuck_t + 0.1 if (sp < 1.0 and math.hypot(*mv) > 0.5) else 0.0
+        if m.stuck_t > 0.8:
+            cmd["jump"] = True
+            cmd["boost"] = True
+        elif not m.grounded and m.stuck_t > 0:
+            cmd["boost"] = True
+        if math.dist(m.pos[:2], c) > r - 5:
+            cmd["boost"] = True
         return cmd
+
+    def house_nav(self, m, goal):
+        from src.world import Path
+        w = self.w
+        if math.dist(m.pos[:2], goal) < 4:
+            return (0.0, 0.0)
+        if w.line_free(m.pos, goal):
+            d = math.dist(m.pos[:2], goal)
+            return ((goal[0] - m.pos[0]) / d, (goal[1] - m.pos[1]) / d)
+        if m.path is None or m.path_goal is None or math.dist(m.path_goal, goal) > 25 or self.tick % 100 == m.id:
+            m.path = Path(w, m.pos, goal)
+            while not m.path.step(20000):
+                pass
+            m.path_goal = goal
+        pts = m.path.points or [goal]
+        tgt = pts[-1]
+        for k, p in enumerate(pts[:14]):
+            if w.line_free(m.pos, p):
+                tgt = p
+        d = math.dist(m.pos[:2], tgt) or 1.0
+        return ((tgt[0] - m.pos[0]) / d, (tgt[1] - m.pos[1]) / d)
 
     def step(self):
         cfg = self.cfg
         ph = self.zone()
         dt = 1.0 / cfg["match"]["tick_hz"] * cfg["match"]["decide_every"]
         times = []
+        us = self.mechs[0]
+        if self.mode == "squad" and us.alive:
+            for o in self.mechs[1:]:
+                if o.alive and self.sees(o, us):
+                    self.squad_seen_t, self.squad_seen_pos = self.t, tuple(us.pos[:2])
+                    break
         for m in self.mechs:
             if not m.alive:
                 continue
@@ -233,6 +450,8 @@ class Sim:
             mag = min(1.0, math.hypot(*mv))
             boost = cmd.get("boost") and m.energy > 0 and mag > 0
             spd = mc["boost_speed"] if boost else mc["walk_speed"]
+            if m.slot1 and m.slot1["kind"] == "laser" and m.slot1["charge"] > 0:
+                spd *= mc["charge_move_mult"]
             if boost:
                 m.energy -= mc["boost_drain"] * dt
                 m.last_spend = self.t
@@ -241,19 +460,36 @@ class Sim:
             tv = [mv[0] * spd, mv[1] * spd] if mag > 1e-6 else [0, 0]
             if mag > 1:
                 tv = [tv[0] / mag, tv[1] / mag]
+            grounded = m.pos[2] <= self.surface(m.pos[0], m.pos[1], m.pos[2]) + 0.05
+            acc = mc["ground_accel"] if grounded else mc["air_accel"]
             for k in (0, 1):
                 dv = tv[k] - m.vel[k]
-                lim = mc["ground_accel"] * dt
+                lim = acc * dt
                 m.vel[k] += max(-lim, min(lim, dv))
+            # vertical: jump, jets, gravity, landing on roofs
+            if cmd.get("jump") and grounded:
+                m.vz = mc["jump_speed"]
+                grounded = False
+            if cmd.get("boost") and not grounded and m.energy > 0:
+                m.vz = min(mc["max_rise_speed"], m.vz + mc["jet_accel"] * dt)
+                m.energy -= mc["jet_drain"] * dt
+                m.last_spend = self.t
+            m.vz -= mc["gravity"] * dt
+            z = m.pos[2] + m.vz * dt
             nx, ny = m.pos[0] + m.vel[0] * dt, m.pos[1] + m.vel[1] * dt
-            if self.w.solid_top(nx, ny) > m.pos[2] + mc["step_up"] or not (self.w.minx + 30 < nx < self.w.maxx - 30 and self.w.miny + 30 < ny < self.w.maxy - 30):
-                if self.w.solid_top(nx, m.pos[1]) <= m.pos[2] + mc["step_up"]:
+            inb = lambda x, y: self.w.minx + 30 < x < self.w.maxx - 30 and self.w.miny + 30 < y < self.w.maxy - 30
+            if self.blocked(nx, ny, max(z, m.pos[2])) or not inb(nx, ny):
+                if not self.blocked(nx, m.pos[1], max(z, m.pos[2])) and inb(nx, m.pos[1]):
                     ny = m.pos[1]; m.vel[1] = 0
-                elif self.w.solid_top(m.pos[0], ny) <= m.pos[2] + mc["step_up"]:
+                elif not self.blocked(m.pos[0], ny, max(z, m.pos[2])) and inb(m.pos[0], ny):
                     nx = m.pos[0]; m.vel[0] = 0
                 else:
                     nx, ny = m.pos[0], m.pos[1]; m.vel[0] = m.vel[1] = 0
-            m.pos = [nx, ny, self.w.ground_at(nx, ny)]
+            surf = self.surface(nx, ny, max(z, m.pos[2]))
+            if z <= surf:
+                z, m.vz = surf, 0.0
+            m.pos = [nx, ny, z]
+            m.grounded = z <= surf + 0.05
             if math.hypot(m.vel[0], m.vel[1]) > cfg["sound"]["step_speed"]:
                 m.step_t += dt
                 if m.step_t >= cfg["sound"]["step_every"]:
@@ -272,6 +508,7 @@ class Sim:
                     m.ammo = gun["mag"]
             if cmd.get("reload") and m.reload <= 0 and m.ammo < gun["mag"]:
                 m.reload = gun["reload"]
+            self.slot1_step(m, cmd, dt)
             fire = cmd.get("fire")
             fire = fire[0] if isinstance(fire, list) else fire
             shots = 0
@@ -279,6 +516,7 @@ class Sim:
                 m.cool += gun["cooldown"]
                 m.ammo -= 1
                 shots += 1
+                m.shots += 1
                 if m.ammo == 0:
                     m.reload = gun["reload"]
                 sp = math.radians(gun["spread_deg"])
@@ -304,17 +542,7 @@ class Sim:
                     if o is owner or not o.alive:
                         continue
                     if math.dist(o.pos[:2], p[:2]) < 2.5 + 0.3 and o.pos[2] <= p[2] <= o.pos[2] + 9:
-                        dmg = self.cfg["weapons"]["gun"]["damage"] * (1 + 0.04 * min(owner.cubes, 10))
-                        yaw_from = math.atan2(-v[1], -v[0])
-                        rear = abs((yaw_from - o.aim[0] + math.pi) % (2 * math.pi) - math.pi) > math.pi / 2
-                        if rear:
-                            dmg *= 1.5
-                        o.hp -= dmg
-                        o.cause = f"shot by {owner.id}"
-                        o.last_hurt = self.t
-                        owner.last_hurt = self.t
-                        o.events.append({"type": "damaged", "amount": dmg, "weapon": "gun", "bearing": yaw_from, "by": owner.id, "rear": rear})
-                        owner.events.append({"type": "hit", "target": o.id, "amount": dmg, "weapon": "gun"})
+                        self.damage(owner, o, self.cfg["weapons"]["gun"]["damage"], "gun", math.atan2(-v[1], -v[0]))
                         hit = True
                         break
                 if hit:
@@ -327,7 +555,8 @@ class Sim:
         for m in self.mechs:
             if not m.alive:
                 continue
-            if math.dist(m.pos[:2], c) > r:
+            if math.dist(m.pos[:2], c) > r and (m.brain is not None or self.mode != "squad" or ph["next_radius"] <= 0):
+                # real house bots handle the zone; they only take zone damage in the final closing circle
                 m.hp -= ph["dps"] * dt
                 m.last_hurt = self.t
                 m.cause = "zone"
@@ -358,7 +587,7 @@ class Sim:
 
     def run(self):
         times = []
-        while self.alive > 1 and self.t < self.cfg["match"]["duration_s"]:
+        while self.alive > 1 and self.t < self.cfg["match"]["duration_s"] and self.mechs[0].alive:
             times += self.step()
         live = [m for m in self.mechs if m.alive]
         live.sort(key=lambda m: -m.hp)
@@ -367,31 +596,55 @@ class Sim:
         return times
 
 
+def play(args):
+    global HELLO, BRAIN
+    spec, seed, mode = args
+    if HELLO is None:
+        HELLO = load_hello()
+    BRAIN = load_brain(spec)
+    world = _world()
+    s = Sim(HELLO["config"], world, seed, mode)
+    s.run()
+    m0 = s.mechs[0]
+    kills = sum(1 for o in s.mechs if o is not m0 and o.cause == "shot by 0" and not o.alive)
+    return seed, m0.place, kills, round(s.t, 1), (m0.cause if not m0.alive else "survived"), (m0.slot1 or {}).get("kind", "-")
+
+
+_W = None
+
+
+def _world():
+    global _W
+    if _W is None:
+        _W = World()
+    return _W
+
+
 def main():
-    global HELLO
+    import multiprocessing as mp
     ap = argparse.ArgumentParser()
-    ap.add_argument("-n", type=int, default=10)
+    ap.add_argument("-n", type=int, default=20)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--squad", action="store_true")
     ap.add_argument("--ffa", action="store_true")
+    ap.add_argument("--brain", default="", help="'' (working tree), 'example', or a git revision")
+    ap.add_argument("-j", type=int, default=max(1, (os.cpu_count() or 2) - 2))
+    ap.add_argument("-v", action="store_true")
     a = ap.parse_args()
-    HELLO = load_hello()
-    cfg = HELLO["config"]
-    world = World()
     mode = "ffa" if a.ffa else "squad" if a.squad else "hunters"
-    pts, places, all_t = [], [], []
-    for k in range(a.n):
-        s = Sim(cfg, world, a.seed + k, mode)
-        all_t += s.run()
-        m0 = s.mechs[0]
-        places.append(m0.place)
-        pts.append(16 - m0.place)
-        cause = "alive" if m0.alive else ("zone" if m0.hp > -200 and not any(True for _ in []) else "?")
-        print(f"match {k:3d}: place {m0.place:2d}  t_end {s.t:5.1f}s  hp {m0.hp:7.0f}  cubes {m0.cubes}  {'survived' if m0.alive else 'died: ' + m0.cause}  alive-at-death {m0.place}")
-    all_t.sort()
-    print(f"\nmode {mode}: mean points {sum(pts) / len(pts):.2f}  (16 - place)  places {places}")
-    if all_t:
-        print(f"brain act() ms: p50 {all_t[len(all_t) // 2] * 1000:.2f}  p99 {all_t[int(len(all_t) * 0.99)] * 1000:.2f}  max {all_t[-1] * 1000:.2f}")
+    load_brain(a.brain)  # extract a revision once, before the workers start
+    jobs = [(a.brain, a.seed + k, mode) for k in range(a.n)]
+    with mp.Pool(a.j) as pool:
+        res = pool.map(play, jobs)
+    pts = [16 - r[1] for r in res]
+    if a.v:
+        for r in res:
+            print(f"seed {r[0]:4d}: place {r[1]:2d} kills {r[2]} t_end {r[3]:5.1f} {r[4]}")
+    import statistics
+    se = statistics.stdev(pts) / math.sqrt(len(pts)) if len(pts) > 1 else 0
+    import collections
+    wk = collections.Counter(r[5] for r in res)
+    print(f"brain={a.brain or 'worktree'} mode={mode} n={a.n}: mean {sum(pts) / len(pts):.2f} +- {se:.2f}  kills {sum(r[2] for r in res) / len(res):.2f}  slot1 at end {dict(wk)}")
 
 
 if __name__ == "__main__":
