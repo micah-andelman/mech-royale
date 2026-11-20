@@ -58,6 +58,7 @@ class Mech:
         self.fire = False
         self.cmd = {}
         self.cause = ''
+        self.skill_err = 0.03
 
 
 class Sim:
@@ -101,6 +102,13 @@ class Sim:
             self.mechs.append(Mech(i, (p[0], p[1], world.ground_at(*p)), cfg, b))
         self.bullets = []
         self.alive = len(self.mechs)
+        # house bot skill: 4 easy, 4 medium, 4 hard, 3 expert (aim noise in radians)
+        errs = [0.07] * 4 + [0.045] * 4 + [0.03] * 4 + [0.018] * 3
+        house = [m for m in self.mechs if m.brain is None]
+        for m, e in zip(house, errs):
+            m.skill_err = e
+        self.order = [m.id for m in house]       # weakest first
+        self.hunters = set(self.order[:1])
 
     def zone(self):
         for ph in self.phases:
@@ -173,16 +181,24 @@ class Sim:
     def hunter_cmd(self, m, ph):
         """House-style hunter: go to the zone, then hunt the nearest visible (or, in squad mode, any) target."""
         c, r = self.zone_now(ph)
-        tgts = [o for o in self.mechs if o.alive and o is not m and (self.mode != "squad" or o.brain is not None)]
-        vis = [o for o in tgts if self.sees(m, o) or self.mode == "squad"]
         cmd = {}
         goal = ph["next_center"]
+        if self.mode == "squad":
+            # house squad (track page rules): never fight each other, share what they see,
+            # one hunter at the start, one more per house bot we kill, all of them late
+            us = self.mechs[0]
+            hunting = m.id in self.hunters or self.t > 300
+            shared = any(self.sees(o, us) for o in self.mechs if o.alive and o.brain is None) if us.alive else False
+            vis = [us] if us.alive and (hunting or shared and self.sees(m, us) or math.dist(m.pos, us.pos) < 45) else []
+        else:
+            tgts = [o for o in self.mechs if o.alive and o is not m]
+            vis = [o for o in tgts if self.sees(m, o)]
         if vis:
             o = min(vis, key=lambda o: math.dist(o.pos, m.pos))
             d = math.dist(o.pos[:2], m.pos[:2])
-            yaw = math.atan2(o.pos[1] - m.pos[1], o.pos[0] - m.pos[0])
+            yaw = math.atan2(o.pos[1] - m.pos[1], o.pos[0] - m.pos[0]) + random.gauss(0, m.skill_err)
             cmd["aim"] = [yaw, 0.0]
-            if d > 60:
+            if d > 60 and (self.mode != "squad" or m.id in self.hunters or self.t > 300):
                 goal = o.pos[:2]
             cmd["fire"] = d < 200 and self.sees(m, o)
         else:
@@ -320,6 +336,10 @@ class Sim:
         dead = [m for m in self.mechs if m.alive and m.hp <= 0]
         for m in dead:
             m.alive = False
+            if self.mode == "squad" and m.brain is None and m.cause == "shot by 0":
+                nxt = [i for i in self.order if i not in self.hunters and self.mechs[i].alive]
+                if nxt:
+                    self.hunters.add(nxt[0])
             m.place = self.alive - len(dead) + 1
             self.sound(m, "death")
         if dead:

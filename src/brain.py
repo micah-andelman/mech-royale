@@ -261,6 +261,14 @@ class Brain:
                 score = 80 - d                                          # it can see us anyway
             elif mh < 0.4 and d < 170 and hpf > 0.6 and len(mechs) <= 2:
                 score = 60 - d / 10 + (1 - mh) * 20                     # vulture
+            elif len(mechs) == 1 and d < 170 and hpf > 0.5:
+                # a lone mech facing us or closing in is hunting us: shoot first
+                to_me = math.atan2(pos[1] - m["pos"][1], pos[0] - m["pos"][0])
+                facing = abs(angdiff(m["aim"][0], to_me)) < 0.5
+                v = m.get("vel", [0, 0, 0])
+                closing = (v[0] * math.cos(to_me) + v[1] * math.sin(to_me)) > 3.0
+                if facing or closing:
+                    score = 70 - d / 10
             if score is not None and (target is None or score > target[0]):
                 target = (score, m)
         if target is None:
@@ -289,7 +297,7 @@ class Brain:
                     continue
                 if slot1 is not None and WEAPON_PREF.get(slot1["kind"], 0) >= WEAPON_PREF[p["kind"]]:
                     continue
-                if dist2(p["pos"], pos) < 45 and self.time_safe(z, t, p["pos"]) > 20 and abs(p["pos"][2] - pos[2]) < 4:
+                if dist2(p["pos"], pos) < (90 if t < 100 else 45) and self.time_safe(z, t, p["pos"]) > 20 and abs(p["pos"][2] - pos[2]) < 4:
                     loot_goal = (p["pos"][0], p["pos"][1])
                     if dist2(p["pos"], pos) < self.cfg["loot"]["pickup_radius"] - 0.5:
                         act["take"] = p["id"]
