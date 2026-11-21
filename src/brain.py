@@ -29,6 +29,10 @@ STRAFE_BOOST_E = float(_os.environ.get("STRAFE_BOOST_E", "999"))
 LOOT_R = float(_os.environ.get("LOOT_R", "150"))
 LOOT_T = float(_os.environ.get("LOOT_T", "120"))
 FLEE = float(_os.environ.get("FLEE", "1.01"))  # always kite: back away while facing and firing
+KA = float(_os.environ.get("KA", "1.0"))
+KG = float(_os.environ.get("KG", "0.6"))
+KP = float(_os.environ.get("KP", "0.8"))
+ZONE_EDGE = float(_os.environ.get("ZONE_EDGE", "0.8"))
 LONE = _os.environ.get("LONE", "0") == "1"
 BAND = {"near": 35.0, "mid": 110.0, "far": 240.0}
 
@@ -369,8 +373,18 @@ class Brain:
             if hpf < FLEE or len(recent_att) > 1:
                 # break off: back away toward our spot while still facing them
                 away = (-dvec[0] / dd, -dvec[1] / dd)
-                mv = (away[0] * 0.7 + mv[0] * 0.5 + perp[0] * self.strafe * 0.4,
-                      away[1] * 0.7 + mv[1] * 0.5 + perp[1] * self.strafe * 0.4)
+                zc, zr = self.zone_at(z, t + 3.0)
+                rx, ry = pos[0] - zc[0], pos[1] - zc[1]
+                rd = math.hypot(rx, ry) or 1.0
+                if rd > zr * ZONE_EDGE or not me["in_zone"]:
+                    # never kite out of the zone: drop the outward part, pull back in near the edge
+                    out = (away[0] * rx + away[1] * ry) / rd
+                    if out > 0:
+                        away = (away[0] - out * rx / rd, away[1] - out * ry / rd)
+                    pull = 1.5 if not me["in_zone"] else 0.6
+                    away = (away[0] - pull * rx / rd, away[1] - pull * ry / rd)
+                mv = (away[0] * KA + mv[0] * KG + perp[0] * self.strafe * KP,
+                      away[1] * KA + mv[1] * KG + perp[1] * self.strafe * KP)
                 mag = 1.0
                 boost = me["energy"] > 20
             else:
