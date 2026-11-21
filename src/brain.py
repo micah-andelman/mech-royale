@@ -518,8 +518,13 @@ class Brain:
                 mv = (mv[0] + ax, mv[1] + ay)
                 mag = max(mag, 1.0)
 
-        # ---------------- combat movement
-        if target is not None:
+        # ---------------- combat movement (the zone comes first: outside it, or about to be, we walk in and
+        # keep shooting instead of strafing; v6 died to the zone kiting in place on the river bank)
+        zone_urgent = (not me["in_zone"]) or tsafe < 12
+        if zone_urgent and target is not None:
+            mag = 1.0
+            boost = me["energy"] > 15
+        if target is not None and not zone_urgent:
             dvec = (target["pos"][0] - pos[0], target["pos"][1] - pos[1])
             dd = math.hypot(*dvec) or 1.0
             perp = (-dvec[1] / dd, dvec[0] / dd)
