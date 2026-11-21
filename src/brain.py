@@ -33,7 +33,12 @@ KA = float(_os.environ.get("KA", "1.0"))
 KG = float(_os.environ.get("KG", "0.6"))
 KP = float(_os.environ.get("KP", "0.8"))
 ZONE_EDGE = float(_os.environ.get("ZONE_EDGE", "0.8"))
+ENG_S = float(_os.environ.get("ENG_S", "12"))
+AVOID = float(_os.environ.get("AVOID", "0"))
 LONE = _os.environ.get("LONE", "0") == "1"
+CUBE2 = _os.environ.get("CUBE2", "1") == "1"
+CUBE_R = float(_os.environ.get("CUBE_R", "70"))
+CUBE_SAFE = float(_os.environ.get("CUBE_SAFE", "60"))
 BAND = {"near": 35.0, "mid": 110.0, "far": 240.0}
 
 
@@ -263,7 +268,7 @@ class Brain:
         npcs = [m for m in obs["mechs"] if m["kind"] == "npc"]
         recent_att = {i for i, at in self.attackers.items() if t - at < 4.0}
         # a fight we are in stays our fight while we can still see them (memory covers 5 s)
-        self.engaged = {i: et for i, et in getattr(self, "engaged", {}).items() if t - et < 12.0}
+        self.engaged = {i: et for i, et in getattr(self, "engaged", {}).items() if t - et < ENG_S}
         for i in recent_att:
             self.engaged[i] = t
 
@@ -337,6 +342,20 @@ class Brain:
                     if dist2(c["pos"], pos) < 35 and abs(c["pos"][2] - pos[2]) < 4 and self.time_safe(z, t, c["pos"]) > 20:
                         loot_goal = (c["pos"][0], c["pos"][1])
                         break
+        cube_rush = False
+        if CUBE2 and loot_goal is None and target is None and me["cubes"] < 10:
+            # kill cubes: collect right after a fight as long as no enemy is close (house bots can take them)
+            near_enemy = any(dist2(m["pos"], pos) < CUBE_SAFE for m in obs["mechs"] if m["kind"] == "mech")
+            if not near_enemy:
+                best = None
+                for c in obs["cubes"]:
+                    dc = dist2(c["pos"], pos)
+                    if dc < CUBE_R and abs(c["pos"][2] - pos[2]) < 4 and self.time_safe(z, t, c["pos"]) > 15:
+                        if best is None or dc < best[0]:
+                            best = (dc, c)
+                if best:
+                    loot_goal = (best[1]["pos"][0], best[1]["pos"][1])
+                    cube_rush = True
         if loot_goal:
             goal = loot_goal
 
@@ -356,10 +375,23 @@ class Brain:
             mag = 1.0
             boost = need > walk and me["energy"] > 35
         else:
-            mag = sneak
+            mag = 1.0 if cube_rush else sneak
         mv = self.nav_vector(pos, goal)
         if mv == (0.0, 0.0):
             mag = 0.0
+
+        # ---------------- keep clear of mechs that are not fighting us (house bots attack inside 45 m)
+        if target is None and AVOID > 0 and mechs:
+            ax = ay = 0.0
+            for m in mechs:
+                d = dist2(m["pos"], pos)
+                if d < AVOID:
+                    f = (AVOID - d) / AVOID
+                    ax += (pos[0] - m["pos"][0]) / max(d, 1.0) * f * 2
+                    ay += (pos[1] - m["pos"][1]) / max(d, 1.0) * f * 2
+            if ax or ay:
+                mv = (mv[0] + ax, mv[1] + ay)
+                mag = max(mag, 1.0)
 
         # ---------------- combat movement
         if target is not None:

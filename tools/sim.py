@@ -101,6 +101,14 @@ class Mech:
         self.path = None
         self.path_goal = None
         self.stuck_t = 0.0
+        self.hp_mult = 1.0
+        self.armor = 0.0
+        self.regen = cfg['mech']['regen_per_s']
+        self.regen_delay = cfg['mech']['regen_delay']
+        self.offer = None
+        self.offers = []
+        self.ups = {}
+        self.thr_i = 0
 
 
 class Sim:
@@ -151,6 +159,8 @@ class Sim:
                 self.pickups.append({"id": 8000 + len(self.pickups), "kind": self.rng.choice(["mortar", "laser", "lightning"]),
                                      "pos": [p[0], p[1], world.ground_at(*p)]})
         self.alive = len(self.mechs)
+        self.cube_items = []
+        self.cube_seq = 0
         # house bot skill: 4 easy, 4 medium, 4 hard, 3 expert (aim noise in radians)
         errs = [0.07] * 4 + [0.045] * 4 + [0.03] * 4 + [0.018] * 3
         house = [m for m in self.mechs if m.brain is None]
@@ -197,8 +207,52 @@ class Sim:
             o["charge"] = w["charge"]
         return o
 
+    def collect_cubes(self):
+        cfgc = self.cfg["cubes"]
+        keep = []
+        for c in self.cube_items:
+            near = [m for m in self.mechs if m.alive and math.dist(m.pos[:2], c["pos"][:2]) <= cfgc["pickup_radius"] and abs(m.pos[2] - c["pos"][2]) <= 4]
+            if not near:
+                keep.append(c)
+                continue
+            m = min(near, key=lambda m: (math.dist(m.pos[:2], c["pos"][:2]), m.id))
+            m.cubes += 1
+            old = m.max_hp
+            m.max_hp = self.cfg["mech"]["hp"] * m.hp_mult * (1 + cfgc["hp_per_cube"] * min(m.cubes, cfgc["stat_cap"]))
+            m.hp += m.max_hp - old
+            m.events.append({"type": "pickup", "cubes": m.cubes})
+            thr = cfgc["upgrade_thresholds"]
+            while m.thr_i < len(thr) and m.cubes >= thr[m.thr_i]:
+                m.thr_i += 1
+                m.offers.append(1)
+        self.cube_items = keep
+        for m in self.mechs:
+            if m.alive and m.offer is None and m.offers:
+                m.offers.pop()
+                pool = [u for u in self.cfg["upgrades"] if "requires" not in u and m.ups.get(u["id"], 0) < u["max"]]
+                ch = random.sample(pool, min(3, len(pool)))
+                m.offer = {"id": self.tick, "expires": self.t + 5, "choices": [{"id": u["id"], "name": u["name"], "desc": u["desc"]} for u in ch]}
+                if m.brain is None:
+                    self.apply_upgrade(m, random.randrange(len(ch)))
+
+    def apply_upgrade(self, m, i):
+        u = m.offer["choices"][i]["id"]
+        m.offer = None
+        m.ups[u] = m.ups.get(u, 0) + 1
+        if u == "plating":
+            m.hp_mult *= 1.15
+            old = m.max_hp
+            m.max_hp = self.cfg["mech"]["hp"] * m.hp_mult * (1 + 0.04 * min(m.cubes, 10))
+            m.hp += m.max_hp - old
+        elif u == "armor":
+            m.armor += 0.08
+        elif u == "nanites":
+            m.regen *= 1.6
+            m.regen_delay -= 1.5
+
     def damage(self, owner, o, dmg, weapon, from_yaw):
         dmg *= 1 + 0.04 * min(owner.cubes, 10)
+        dmg *= max(0.0, 1 - o.armor)
         rear = abs((from_yaw - o.aim[0] + math.pi) % (2 * math.pi) - math.pi) > math.pi / 2
         if rear:
             dmg *= 1.5
@@ -341,10 +395,10 @@ class Sim:
                      "weapons": [{"kind": "gun", "cooldown": max(0, m.cool), "ammo": m.ammo, "reload": max(0, m.reload),
                                   "stats": gun}, self.slot_obs(m)],
                      "stats": dict(self.cfg["mech"])},
-            "mechs": vis, "projectiles": [], "crates": [], "cubes": [], "pickups": [p for p in self.pickups if self.sees_point(m, p["pos"])],
+            "mechs": vis, "projectiles": [], "crates": [], "cubes": [{"id": c["id"], "pos": c["pos"]} for c in self.cube_items if self.sees_point(m, c["pos"])], "pickups": [p for p in self.pickups if self.sees_point(m, p["pos"])],
             "sounds": m.sounds, "beams": [], "events": m.events, "drops": [],
             "zone": {k: ph[k] for k in ("center", "radius", "next_center", "next_radius", "shrink_start", "shrink_end", "dps")},
-            "offer": None,
+            "offer": m.offer,
         }
 
     def hunter_cmd(self, m, ph):
@@ -447,6 +501,12 @@ class Sim:
                 t0 = time.perf_counter()
                 m.cmd = m.brain.act(o)
                 times.append(time.perf_counter() - t0)
+                if m.offer is not None:
+                    pk = m.cmd.get("pick")
+                    if isinstance(pk, int) and 0 <= pk < len(m.offer["choices"]):
+                        self.apply_upgrade(m, pk)
+                    elif self.t >= m.offer["expires"]:
+                        self.apply_upgrade(m, 0)
             else:
                 m.cmd = self.hunter_cmd(m, ph)
             m.events, m.sounds = [], []
@@ -569,8 +629,8 @@ class Sim:
                 m.hp -= ph["dps"] * dt
                 m.last_hurt = self.t
                 m.cause = "zone"
-            elif self.t - m.last_hurt > mc["regen_delay"]:
-                m.hp = min(m.max_hp, m.hp + mc["regen_per_s"] * dt)
+            elif self.t - m.last_hurt > m.regen_delay:
+                m.hp = min(m.max_hp, m.hp + m.regen * dt)
         dead = [m for m in self.mechs if m.alive and m.hp <= 0]
         for m in dead:
             m.alive = False
@@ -580,15 +640,13 @@ class Sim:
                     self.hunters.add(nxt[0])
             m.place = self.alive - len(dead) + 1
             self.sound(m, "death")
-        if dead:
-            # cubes to the nearest living mech (stand-in for walking over the drop)
-            for m in dead:
-                near = [o for o in self.mechs if o.alive]
-                if near:
-                    o = min(near, key=lambda o: math.dist(o.pos, m.pos))
-                    if math.dist(o.pos, m.pos) < 40:
-                        o.cubes += m.cubes + 2
-                        o.max_hp = self.cfg["mech"]["hp"] * (1 + 0.04 * min(o.cubes, 10))
+        for m in dead:
+            # dead mechs drop all their cubes plus two, as pickups on the ground (protocol 10)
+            for k in range(m.cubes + 2):
+                a = random.uniform(0, 2 * math.pi)
+                self.cube_seq += 1
+                self.cube_items.append({"id": 5000 + self.cube_seq, "pos": [m.pos[0] + math.cos(a) * 1.5, m.pos[1] + math.sin(a) * 1.5, m.pos[2]]})
+        self.collect_cubes()
         self.alive -= len(dead)
         self.t += dt
         self.tick += cfg["match"]["decide_every"]
