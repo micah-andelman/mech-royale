@@ -51,6 +51,7 @@ WANT = float(_os.environ.get("WANT", "145"))          # standoff distance in hun
 HUNT_R = float(_os.environ.get("HUNT_R", "210"))
 UPG2 = _os.environ.get("UPG2", "0") == "1"
 ANTI_LIGHT = _os.environ.get("ANTI_LIGHT", "0") == "1"
+FACE = _os.environ.get("FACE", "0") == "1"            # face unseen attackers, switch to the top damager, never show our back
 COVER = _os.environ.get("COVER", "0") == "1"          # step out of the target's sight while our weapons reload
 FIRE_ALL = _os.environ.get("FIRE_ALL", "0") == "1"   # shoot the best visible mech in every mode
 LASER_FIRST = _os.environ.get("LASER_FIRST", "0") == "1"   # get a laser/lightning before hunting; remember pickups
@@ -148,6 +149,8 @@ class Brain:
         for e in obs["events"]:
             if e["type"] == "damaged" and e.get("by") is not None:
                 self.attackers[e["by"]] = t
+                if e["by"] < 16:
+                    self.dmg_log = [d for d in getattr(self, "dmg_log", []) if t - d[0] < 2.0] + [(t, e["by"], e.get("amount", 0), e.get("bearing"))]
                 if e.get("bearing") is not None:
                     self.last_dmg = (t, e["bearing"])
         pm = getattr(self, "pk_mem", {})
@@ -693,6 +696,22 @@ class Brain:
 
         # ---------------- aim, look, fire
         fire = [False, False]
+        unseen_bearing = None
+        if FACE:
+            recent = [d for d in getattr(self, "dmg_log", []) if t - d[0] < 2.0]
+            if recent:
+                tot = {}
+                for d in recent:
+                    tot[d[1]] = tot.get(d[1], 0) + d[2]
+                top = max(tot, key=tot.get)
+                vis_by_id = {m["id"]: m for m in mechs}
+                if top in vis_by_id:
+                    if target is None or target.get("id") != top:
+                        target = vis_by_id[top]          # the mech hurting us most is the one to shoot
+                else:
+                    last = [d for d in recent if d[1] == top and d[3] is not None]
+                    if last:
+                        unseen_bearing = last[-1][3]      # shot by someone we can't see: face it now
         aim_tgt = target
         if aim_tgt is None and FIRE_ALL and mechs:
             # fire in every mode: shoot the best visible mech even while looting or moving
@@ -719,6 +738,8 @@ class Brain:
                 lp = math.atan2(tz - ez, max(1.0, math.hypot(tx - pos[0], ty - pos[1])))
                 laser_aim = (ly, lp)
             act["aim"] = list(laser_aim) if laser_aim else [yaw, pitch]
+            if unseen_bearing is not None and aim_tgt["id"] not in {d[1] for d in getattr(self, "dmg_log", []) if t - d[0] < 2.0}:
+                act["aim"] = [unseen_bearing, 0.0]
             for i, wpn in enumerate(me["weapons"]):
                 if not wpn:
                     continue
@@ -751,7 +772,16 @@ class Brain:
             self.scan_yaw = yaw
         else:
             look = None
-            if self.last_dmg and t - self.last_dmg[0] < 3:
+            if FACE and unseen_bearing is not None:
+                look = unseen_bearing
+            elif FACE and self.seen:
+                # keep facing the most recently seen mech for 4 s (retreating, hiding, looting): never our back
+                sid, sv = max(self.seen.items(), key=lambda kv: kv[1][0])
+                if t - sv[0] < 4.0 and dist2(sv[1], pos) < 200:
+                    look = math.atan2(sv[1][1] - pos[1], sv[1][0] - pos[0])
+            if look is not None:
+                pass
+            elif self.last_dmg and t - self.last_dmg[0] < 3:
                 look = self.last_dmg[1]
             else:
                 loud = [s for s in obs["sounds"] if s["kind"] in LOUD and s["dist"] != "far"]
