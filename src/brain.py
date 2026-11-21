@@ -26,6 +26,9 @@ STRAFE_MIN = float(_os.environ.get("STRAFE_MIN", "0.6"))
 STRAFE_MAX = float(_os.environ.get("STRAFE_MAX", "1.4"))
 STRAFE_GOAL = float(_os.environ.get("STRAFE_GOAL", "0.5"))
 STRAFE_BOOST_E = float(_os.environ.get("STRAFE_BOOST_E", "999"))
+LOOT_R = float(_os.environ.get("LOOT_R", "150"))
+LOOT_T = float(_os.environ.get("LOOT_T", "120"))
+FLEE = float(_os.environ.get("FLEE", "1.01"))  # always kite: back away while facing and firing
 LONE = _os.environ.get("LONE", "0") == "1"
 BAND = {"near": 35.0, "mid": 110.0, "far": 240.0}
 
@@ -305,18 +308,26 @@ class Brain:
         if calm:
             slot1 = me["weapons"][1]
             have = {wp["kind"] for wp in me["weapons"] if wp}
+            best = None
             for p in obs["pickups"]:
                 if p["kind"] in have or WEAPON_PREF.get(p["kind"], 0) < 2:
                     continue
                 if slot1 is not None and WEAPON_PREF.get(slot1["kind"], 0) >= WEAPON_PREF[p["kind"]]:
                     continue
-                if dist2(p["pos"], pos) < (90 if t < 100 else 45) and self.time_safe(z, t, p["pos"]) > 20 and abs(p["pos"][2] - pos[2]) < 4:
-                    loot_goal = (p["pos"][0], p["pos"][1])
-                    if dist2(p["pos"], pos) < self.cfg["loot"]["pickup_radius"] - 0.5:
-                        act["take"] = p["id"]
-                        if slot1 is not None:
-                            act["drop"] = 1
-                    break
+                dp = dist2(p["pos"], pos)
+                if dp < (LOOT_R if t < LOOT_T else 45) and self.time_safe(z, t, p["pos"]) > 20 and abs(p["pos"][2] - pos[2]) < 4:
+                    if best is None or dp < best[0]:
+                        best = (dp, p)
+            if best:
+                p = best[1]
+                self.loot_target = (p["pos"][0], p["pos"][1], t)
+                loot_goal = (p["pos"][0], p["pos"][1])
+                if best[0] < self.cfg["loot"]["pickup_radius"] - 0.5:
+                    act["take"] = p["id"]
+                    if slot1 is not None:
+                        act["drop"] = 1
+            elif getattr(self, "loot_target", None) and t - self.loot_target[2] < 20 and slot1 is None                     and dist2(self.loot_target, pos) > 3:
+                loot_goal = self.loot_target[:2]   # keep walking to a pickup we saw but lost from view
             if loot_goal is None and me["cubes"] < 10:
                 for c in obs["cubes"]:
                     if dist2(c["pos"], pos) < 35 and abs(c["pos"][2] - pos[2]) < 4 and self.time_safe(z, t, c["pos"]) > 20:
@@ -355,7 +366,7 @@ class Brain:
                 self.strafe = -self.strafe
                 self.strafe_t = t
                 self.strafe_len = self.rng.uniform(STRAFE_MIN, STRAFE_MAX)
-            if hpf < 0.35 or len(recent_att) > 1:
+            if hpf < FLEE or len(recent_att) > 1:
                 # break off: back away toward our spot while still facing them
                 away = (-dvec[0] / dd, -dvec[1] / dd)
                 mv = (away[0] * 0.7 + mv[0] * 0.5 + perp[0] * self.strafe * 0.4,

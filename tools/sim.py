@@ -178,6 +178,16 @@ class Sim:
         return ([ph["center"][k] + (ph["next_center"][k] - ph["center"][k]) * f for k in (0, 1)],
                 ph["radius"] + (ph["next_radius"] - ph["radius"]) * f)
 
+    def sees_point(self, m, q):
+        d = math.dist(q[:2], m.pos[:2])
+        if d > 200:
+            return False
+        if d > 45:
+            yaw = math.atan2(q[1] - m.pos[1], q[0] - m.pos[0])
+            if abs((yaw - m.aim[0] + math.pi) % (2 * math.pi) - math.pi) > math.radians(60):
+                return False
+        return self.w.los((m.pos[0], m.pos[1], m.pos[2] + 8), (q[0], q[1], q[2] + 1), 3.0)
+
     def slot_obs(self, m):
         w = m.slot1
         if not w:
@@ -331,8 +341,7 @@ class Sim:
                      "weapons": [{"kind": "gun", "cooldown": max(0, m.cool), "ammo": m.ammo, "reload": max(0, m.reload),
                                   "stats": gun}, self.slot_obs(m)],
                      "stats": dict(self.cfg["mech"])},
-            "mechs": vis, "projectiles": [], "crates": [], "cubes": [], "pickups": [p for p in self.pickups if math.dist(p["pos"][:2], m.pos[:2]) < 90
-                                                                          and self.w.los((m.pos[0], m.pos[1], m.pos[2] + 8), (p["pos"][0], p["pos"][1], p["pos"][2] + 1), 3.0)],
+            "mechs": vis, "projectiles": [], "crates": [], "cubes": [], "pickups": [p for p in self.pickups if self.sees_point(m, p["pos"])],
             "sounds": m.sounds, "beams": [], "events": m.events, "drops": [],
             "zone": {k: ph[k] for k in ("center", "radius", "next_center", "next_radius", "shrink_start", "shrink_end", "dps")},
             "offer": None,
