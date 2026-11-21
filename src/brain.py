@@ -51,6 +51,8 @@ WANT = float(_os.environ.get("WANT", "145"))          # standoff distance in hun
 HUNT_R = float(_os.environ.get("HUNT_R", "210"))
 UPG2 = _os.environ.get("UPG2", "0") == "1"
 ANTI_LIGHT = _os.environ.get("ANTI_LIGHT", "0") == "1"
+COVER = _os.environ.get("COVER", "0") == "1"          # step out of the target's sight while our weapons reload
+FIRE_ALL = _os.environ.get("FIRE_ALL", "0") == "1"   # shoot the best visible mech in every mode
 LASER_FIRST = _os.environ.get("LASER_FIRST", "0") == "1"   # get a laser/lightning before hunting; remember pickups
 DUEL = _os.environ.get("DUEL", "0") == "1"          # spec posture: opening -> practice duelist / FFA filter
 OPEN_T = float(_os.environ.get("OPEN_T", "30"))       # quiet opening length (s)
@@ -280,6 +282,30 @@ class Brain:
         yaw = math.atan2(ay - me["pos"][1], ax - me["pos"][0])
         pitch = math.atan2(az - mz, math.hypot(ax - me["pos"][0], ay - me["pos"][1]))
         return yaw, pitch, d
+
+    def hide_spot(self, pos, threats, t):
+        """Nearest walkable point within ~20 m, reachable in a straight line, that no threat can see."""
+        hs = getattr(self, "_hide", None)
+        if hs and t - hs[0] < 0.5 and dist2(hs[2], pos) < 6:
+            return hs[1]
+        best = None
+        g = self.w.ground_at
+        for r in (5.0, 9.0, 14.0, 20.0):
+            for k in range(16):
+                a = k * TAU / 16
+                q = (pos[0] + math.cos(a) * r, pos[1] + math.sin(a) * r)
+                I, J = self.w.nidx(*q)
+                if not self.w.nfree(I, J) or not self.w.line_free(pos, q):
+                    continue
+                chest = (q[0], q[1], g(*q) + 4.5)
+                if any(self.w.los((m[0], m[1], m[2] + 8.0), chest) for m in threats):
+                    continue
+                best = q
+                break
+            if best:
+                break
+        self._hide = (t, best, (pos[0], pos[1]))
+        return best
 
     # ------------------------------------------------------------------ main
     def act(self, obs):
@@ -591,6 +617,26 @@ class Brain:
                 mv = (mvx, mvy)
                 mag = 1.0
                 boost = dd < 80 and want >= 90 and me["energy"] > 35
+                if COVER:
+                    ready = False
+                    for wpn in me["weapons"]:
+                        if not wpn:
+                            continue
+                        if wpn["kind"] == "gun" and wpn.get("reload", 0) == 0 and wpn.get("ammo", 1) > 0:
+                            ready = True
+                        elif wpn["kind"] == "laser" and wpn.get("cooldown", 0) < 0.3:
+                            ready = True
+                        elif wpn["kind"] == "lightning" and dd < 45 and me["energy"] > 10:
+                            ready = True
+                    if not ready:
+                        threats = [m["pos"] for m in mechs if dist2(m["pos"], pos) < 220]
+                        hs = self.hide_spot(pos, threats, t)
+                        if hs is not None:
+                            hx, hy = hs[0] - pos[0], hs[1] - pos[1]
+                            hn = math.hypot(hx, hy) or 1.0
+                            mv = (hx / hn, hy / hn) if hn > 1.5 else (0.0, 0.0)
+                            mag = 1.0 if hn > 1.5 else 0.0
+                            boost = hn > 6 and me["energy"] > 25
             elif hpf < FLEE or len(recent_att) > 1:
                 # break off: back away toward our spot while still facing them
                 away = (-dvec[0] / dd, -dvec[1] / dd)
@@ -647,10 +693,17 @@ class Brain:
 
         # ---------------- aim, look, fire
         fire = [False, False]
-        if target is not None:
+        aim_tgt = target
+        if aim_tgt is None and FIRE_ALL and mechs:
+            # fire in every mode: shoot the best visible mech even while looting or moving
+            cand = [m for m in mechs if dist2(m["pos"], pos) < 200]
+            if cand:
+                aim_tgt = min(cand, key=lambda m: dist2(m["pos"], pos) + 90 * m.get("hp", 1400) / 1400
+                              - (60 if m["id"] in recent_att else 0))
+        if aim_tgt is not None:
             gun = me["weapons"][0]
             spd = gun["stats"]["speed"] if gun and gun["kind"] == "gun" else 252
-            yaw, pitch, d = self.lead(me, target, spd)
+            yaw, pitch, d = self.lead(me, aim_tgt, spd)
             act["aim"] = [yaw, pitch]
             err = abs(angdiff(me["aim"][0], yaw)) + abs(me["aim"][1] - pitch) * 0.5
             tol = math.atan2(2.0, max(d, 1.0)) + 0.01
@@ -666,7 +719,7 @@ class Brain:
                     if d < s["range"] * 0.95 and abs(angdiff(me["aim"][0], yaw)) < math.radians(s["cone_deg"]) * 0.4:
                         fire[i] = True
                 elif k == "laser":
-                    tgt_yaw = math.atan2(target["pos"][1] - pos[1], target["pos"][0] - pos[0])
+                    tgt_yaw = math.atan2(aim_tgt["pos"][1] - pos[1], aim_tgt["pos"][0] - pos[0])
                     charge = wpn.get("charge", 0)
                     if d < s["range"] * 0.95 and wpn.get("cooldown", 0) == 0:
                         if charge >= s["charge"] * 0.92 and abs(angdiff(me["aim"][0], tgt_yaw)) < tol * 1.5:
