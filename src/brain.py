@@ -17,6 +17,11 @@ UPGRADE_ORDER_HUNT = [
     "laser_charge", "reactor", "capacitor", "jets", "gyros", "gun_mag", "sensors", "gun_velocity",
     "lightning_chain", "lightning_range", "laser_pierce", "mortar_reload", "mortar_splash", "mortar_velocity",
 ]
+UPGRADE_ORDER_MOBILE = [
+    "plating", "armor", "servos", "jets", "reactor", "nanites", "laser_damage", "gun_damage", "capacitor",
+    "lightning_efficiency", "gun_rate", "laser_charge", "gyros", "gun_mag", "sensors", "gun_velocity",
+    "lightning_chain", "lightning_range", "laser_pierce", "mortar_reload", "mortar_splash", "mortar_velocity",
+]
 UPGRADE_ORDER = [
     "plating", "armor", "nanites", "sensors", "capacitor", "reactor", "jets", "gyros", "servos",
     "lightning_efficiency", "laser_charge", "laser_damage", "gun_rate", "gun_damage", "gun_velocity",
@@ -58,6 +63,7 @@ CRATES = _os.environ.get("CRATES", "0") == "1"        # shoot ground crates (1 c
 STANDOFF = _os.environ.get("STANDOFF", "0") == "1"    # gun-only standoff WANT_GUN (85 m); 145 m with a laser
 FINISH = _os.environ.get("FINISH", "0") == "1"        # finish targets under 30% max HP even while in regen
 FIRE_ANY = _os.environ.get("FIRE_ANY", "0") == "1"    # shoot the best visible mech in every mode except while regen-hiding
+UPG3 = _os.environ.get("UPG3", "0") == "1"              # mobility upgrades (servos, jets, reactor) right after plating + armor
 BOOSTFIGHT = _os.environ.get("BOOSTFIGHT", "0") == "1"  # boost while moving in any fight, energy hysteresis (off <30, on >60)
 MIDCUBE = _os.environ.get("MIDCUBE", "0") == "1"      # step onto cubes mid-fight (measured harmful by Th3r0n; keep off)
 WANT_GUN = float(_os.environ.get("WANT_GUN", "85"))
@@ -364,7 +370,7 @@ class Brain:
         # upgrades
         if obs.get("offer"):
             ch = obs["offer"]["choices"]
-            rank = {u: i for i, u in enumerate(UPGRADE_ORDER_HUNT if (UPG2 or HUNT or DUEL) else UPGRADE_ORDER)}
+            rank = {u: i for i, u in enumerate(UPGRADE_ORDER_MOBILE if UPG3 else UPGRADE_ORDER_HUNT if (UPG2 or HUNT or DUEL) else UPGRADE_ORDER)}
             act["pick"] = min(range(len(ch)), key=lambda i: rank.get(ch[i]["id"], 99))
 
         hpf = me["hp"] / max(1.0, me["max_hp"])
