@@ -704,9 +704,21 @@ class Brain:
             gun = me["weapons"][0]
             spd = gun["stats"]["speed"] if gun and gun["kind"] == "gun" else 252
             yaw, pitch, d = self.lead(me, aim_tgt, spd)
-            act["aim"] = [yaw, pitch]
             err = abs(angdiff(me["aim"][0], yaw)) + abs(me["aim"][1] - pitch) * 0.5
             tol = math.atan2(2.0, max(d, 1.0)) + 0.01
+            # the laser is hitscan: while it is charging or about to be ready, aim straight at where the
+            # target will be one decision from now, not at the gun's bullet intercept
+            las = next((w for w in me["weapons"] if w and w["kind"] == "laser"), None)
+            laser_aim = None
+            if las is not None and d < las["stats"]["range"] * 0.95 and (las.get("charge", 0) > 0 or las.get("cooldown", 0) < 0.3):
+                v = aim_tgt.get("vel", [0, 0, 0])
+                tx, ty = aim_tgt["pos"][0] + v[0] * 0.1, aim_tgt["pos"][1] + v[1] * 0.1
+                tz = aim_tgt["pos"][2] + (4.5 if aim_tgt["kind"] == "mech" else 1.75)
+                ez = pos[2] + st.get("muzzle_height", 7)
+                ly = math.atan2(ty - pos[1], tx - pos[0])
+                lp = math.atan2(tz - ez, max(1.0, math.hypot(tx - pos[0], ty - pos[1])))
+                laser_aim = (ly, lp)
+            act["aim"] = list(laser_aim) if laser_aim else [yaw, pitch]
             for i, wpn in enumerate(me["weapons"]):
                 if not wpn:
                     continue
@@ -719,13 +731,21 @@ class Brain:
                     if d < s["range"] * 0.95 and abs(angdiff(me["aim"][0], yaw)) < math.radians(s["cone_deg"]) * 0.4:
                         fire[i] = True
                 elif k == "laser":
-                    tgt_yaw = math.atan2(aim_tgt["pos"][1] - pos[1], aim_tgt["pos"][0] - pos[0])
                     charge = wpn.get("charge", 0)
-                    if d < s["range"] * 0.95 and wpn.get("cooldown", 0) == 0:
-                        if charge >= s["charge"] * 0.92 and abs(angdiff(me["aim"][0], tgt_yaw)) < tol * 1.5:
-                            fire[i] = False  # let go: fire
+                    if laser_aim and wpn.get("cooldown", 0) == 0:
+                        on = (abs(angdiff(me["aim"][0], laser_aim[0])) < tol
+                              and abs(me["aim"][1] - laser_aim[1]) < tol * 1.5)
+                        full = charge >= s["charge"] * 0.95
+                        if full and getattr(self, "laser_full_t", None) is None:
+                            self.laser_full_t = t
+                        if not full:
+                            self.laser_full_t = None
+                        hold = self.cfg.get("weapons", {}).get("laser", {}).get("hold_s", 2.0)
+                        near_auto = full and t - self.laser_full_t > hold - 0.35
+                        if full and (on or near_auto):
+                            fire[i] = False  # let go: fire (on target, or before the hold timer fires it anyway)
                         else:
-                            fire[i] = True   # keep charging
+                            fire[i] = True   # keep charging / hold until aligned
             if me["weapons"][0] and me["weapons"][0]["kind"] == "gun" and me["weapons"][0].get("ammo", 1) == 0:
                 act["reload"] = True
             self.scan_yaw = yaw
