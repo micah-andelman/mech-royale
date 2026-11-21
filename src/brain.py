@@ -64,6 +64,7 @@ STANDOFF = _os.environ.get("STANDOFF", "0") == "1"    # gun-only standoff WANT_G
 FINISH = _os.environ.get("FINISH", "0") == "1"        # finish targets under 30% max HP even while in regen
 FIRE_ANY = _os.environ.get("FIRE_ANY", "0") == "1"    # shoot the best visible mech in every mode except while regen-hiding
 UPG3 = _os.environ.get("UPG3", "0") == "1"              # mobility upgrades (servos, jets, reactor) right after plating + armor
+FOCUS = _os.environ.get("FOCUS", "0") == "1"            # practice: stay on the current target until it dies or leaves view
 LETHAL = _os.environ.get("LETHAL", "0") == "1"          # release a partial laser charge early when it already kills the target
 BOOSTFIGHT = _os.environ.get("BOOSTFIGHT", "0") == "1"  # boost while moving in any fight, energy hysteresis (off <30, on >60)
 MIDCUBE = _os.environ.get("MIDCUBE", "0") == "1"      # step onto cubes mid-fight (measured harmful by Th3r0n; keep off)
@@ -482,7 +483,7 @@ class Brain:
             best = None
             for m in vis:
                 d = dist2(m["pos"], pos)
-                pr = m.get("hp", 1400) + 3 * d - (150 if m["id"] in recent_att else 0) - (200 if m["id"] == cur else 0)
+                pr = m.get("hp", 1400) + 3 * d - (150 if m["id"] in recent_att else 0) - ((700 if FOCUS else 200) if m["id"] == cur else 0)
                 if best is None or pr < best[0]:
                     best = (pr, m)
             if best:
@@ -820,7 +821,11 @@ class Brain:
                     tot[d[1]] = tot.get(d[1], 0) + d[2]
                 top = max(tot, key=tot.get)
                 vis_by_id = {m["id"]: m for m in mechs}
-                if top in vis_by_id:
+                keep = (FOCUS and not getattr(self, "ffa", False) and target is not None and target.get("kind") == "mech"
+                        and target.get("id") in vis_by_id)
+                if keep:
+                    pass
+                elif top in vis_by_id:
                     if target is None or target.get("id") != top:
                         target = vis_by_id[top]          # the mech hurting us most is the one to shoot
                 else:
