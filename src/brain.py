@@ -13,7 +13,7 @@ from .world import Path, World
 TAU = 2 * math.pi
 
 UPGRADE_ORDER_HUNT = [
-    "armor", "plating", "nanites", "servos", "laser_damage", "gun_damage", "lightning_efficiency", "gun_rate",
+    "plating", "armor", "nanites", "servos", "laser_damage", "gun_damage", "lightning_efficiency", "gun_rate",
     "laser_charge", "reactor", "capacitor", "jets", "gyros", "gun_mag", "sensors", "gun_velocity",
     "lightning_chain", "lightning_range", "laser_pierce", "mortar_reload", "mortar_splash", "mortar_velocity",
 ]
@@ -50,6 +50,11 @@ HUNT = _os.environ.get("HUNT", "0") == "1"          # practice: hunt every house
 WANT = float(_os.environ.get("WANT", "145"))          # standoff distance in hunt fights
 HUNT_R = float(_os.environ.get("HUNT_R", "210"))
 UPG2 = _os.environ.get("UPG2", "0") == "1"
+DUEL = _os.environ.get("DUEL", "0") == "1"          # spec posture: opening -> practice duelist / FFA filter
+OPEN_T = float(_os.environ.get("OPEN_T", "30"))       # quiet opening length (s)
+DUEL_R = float(_os.environ.get("DUEL_R", "150"))      # practice: take 1v1s inside this range
+HEAL_TO = float(_os.environ.get("HEAL_TO", "0.9"))    # practice: heal to this before the next duel
+RANGE = {"laser": float(_os.environ.get("R_LASER", "110")), "lightning": 28.0, "gun": float(_os.environ.get("R_GUN", "60"))}
 BAND = {"near": 35.0, "mid": 110.0, "far": 240.0}
 
 
@@ -276,7 +281,7 @@ class Brain:
         # upgrades
         if obs.get("offer"):
             ch = obs["offer"]["choices"]
-            rank = {u: i for i, u in enumerate(UPGRADE_ORDER_HUNT if (UPG2 or HUNT) else UPGRADE_ORDER)}
+            rank = {u: i for i, u in enumerate(UPGRADE_ORDER_HUNT if (UPG2 or HUNT or DUEL) else UPGRADE_ORDER)}
             act["pick"] = min(range(len(ch)), key=lambda i: rank.get(ch[i]["id"], 99))
 
         hpf = me["hp"] / max(1.0, me["max_hp"])
@@ -310,6 +315,64 @@ class Brain:
                     score = 70 - d / 10
             if score is not None and (target is None or score > target[0]):
                 target = (score, m)
+        # ---- DUEL posture (our design spec): quiet opening, then practice duelist or FFA filter
+        self.ffa = getattr(self, "other_deaths", 0) >= 2
+        if DUEL:
+            target = None
+            evade_from = None
+            my_kinds = {w["kind"] for w in me["weapons"] if w}
+            have_laser = "laser" in my_kinds
+            if getattr(self, "regen", False) and (hpf >= HEAL_TO or t - getattr(self, "last_hit_t", -99) < 0.5 and False):
+                self.regen = False
+            cur = getattr(self, "last_tgt", None)
+            cand = []
+            for m in mechs:
+                d = dist2(m["pos"], pos)
+                mh = m.get("hp", 1400)
+                to_me = math.atan2(pos[1] - m["pos"][1], pos[0] - m["pos"][0])
+                back = abs(angdiff(m["aim"][0], to_me)) > 1.9
+                mk = {(w["kind"] if isinstance(w, dict) else w) for w in (m.get("weapons") or []) if w}
+                sc = d + 90 * mh / 1400 - (50 if m["id"] in recent_att else 0) - (40 if m["id"] == cur else 0) - (40 if back else 0)
+                if have_laser and "mortar" in mk and d < 260:
+                    sc -= 60                                   # cook-off: laser hits on mortar carriers do +60%
+                if "lightning" in my_kinds and m.get("charging") and d < 40:
+                    sc -= 60                                   # lightning shorts a charging laser
+                cand.append((sc, d, m))
+            cand.sort(key=lambda c: c[0])
+            near = [c for c in cand if c[1] < 100]
+            threats = len([c for c in cand if c[2]["id"] in recent_att or c[1] < 60])
+            pick = cand[0] if cand else None
+            if pick:
+                sc, d, m = pick
+                mh = m.get("hp", 1400) / max(1.0, m.get("max_hp", 1400))
+                finishing = mh < 0.2 and hpf > 0.2 and threats <= 2
+                attacked = m["id"] in recent_att or d < 40
+                if t < OPEN_T:
+                    engage = attacked
+                elif self.ffa:
+                    alive = obs.get("alive", 16)
+                    engage = (attacked or alive <= 4 or (mh < 0.45 and d < 120 and hpf > 0.4)
+                              or (hpf > 0.75 and me["cubes"] >= m.get("cubes", 0) + 3 and d < 70))
+                else:
+                    solo = len(near) <= 1
+                    engage = attacked or (d < DUEL_R and solo and hpf >= HEAL_TO and m.get("hp", 1400) <= 1.2 * me["hp"])
+                    if getattr(self, "regen", False) and not attacked:
+                        engage = False
+                losing = ((hpf < 0.35 and mh > hpf + 0.1) or (threats >= 2 and hpf < 0.55) or (threats >= 3 and hpf < 0.8))
+                if losing and not finishing:
+                    self.regen = True
+                    engage = False
+                if engage or finishing:
+                    target = (999, m)
+                    self.last_tgt = m["id"]
+                elif attacked or losing:
+                    evade_from = m["pos"][:2]
+            if target is None and not mechs and hpf < HEAL_TO and t - getattr(self, "fight_t", -99) < 30:
+                self.regen = True
+            if target is not None:
+                self.fight_t = t
+            self.duel_evade = evade_from
+            self.duel_heal = target is None and getattr(self, "regen", False)
         # hunt mode (practice squad): every house bot has to die, so fight anything in view from long range,
         # backing off only to regenerate. Two deaths we did not cause mean a free-for-all: back to v6 rules.
         self.ffa = getattr(self, "other_deaths", 0) >= 2
@@ -348,7 +411,7 @@ class Brain:
                     if target is None or sc > target[0]:
                         target = (sc, m)
         target = target[1] if target else None
-        evade_from = None
+        evade_from = getattr(self, "duel_evade", None) if DUEL else None
         if (HEAL > 0 and target is not None and target["kind"] == "mech" and target["id"] not in recent_att
                 and hpf < HEAL and dist2(target["pos"], pos) > HEAL_D):
             # hurt and not under fire: back off and let regen work before the next fight
@@ -429,6 +492,8 @@ class Brain:
             boost = need > walk and me["energy"] > 35
         else:
             mag = 1.0 if cube_rush else sneak
+            if DUEL and getattr(self, "duel_heal", False) and evade_from is None and not cube_rush:
+                mag = 0.0      # heal to full: stand still and let regen work
         mv = self.nav_vector(pos, goal)
         if evade_from is not None:
             ax, ay = pos[0] - evade_from[0], pos[1] - evade_from[1]
@@ -460,9 +525,17 @@ class Brain:
                 self.strafe = -self.strafe
                 self.strafe_t = t
                 self.strafe_len = self.rng.uniform(STRAFE_MIN, STRAFE_MAX)
-            if hunting and target["kind"] == "mech":
+            if (hunting or DUEL) and target["kind"] == "mech":
                 light = any(w and w["kind"] == "lightning" for w in me["weapons"]) and me["energy"] > 20
-                want = 30.0 if (light and target.get("hp", 1400) < 500 and dd < 70) else WANT
+                if DUEL:
+                    kinds = {w["kind"] for w in me["weapons"] if w}
+                    want = RANGE["laser"] if "laser" in kinds else RANGE["gun"]
+                    if light and (dd < 60 or target.get("hp", 1400) < 500):
+                        want = RANGE["lightning"]
+                    if abs(dd - want) < 15:
+                        want = dd                               # inside the band: just strafe
+                else:
+                    want = 30.0 if (light and target.get("hp", 1400) < 500 and dd < 70) else WANT
                 radial = max(-1.0, min(1.0, (dd - want) / 30.0))
                 fwd = (dvec[0] / dd, dvec[1] / dd)
                 mvx = fwd[0] * radial + perp[0] * self.strafe * 0.8

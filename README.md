@@ -27,3 +27,13 @@ Docker Desktop has to be running.
 
 ## Submitting
 The scorer needs a **public** GitHub repo with the Dockerfile at its top. Submit the repo URL on the track page (4 per hour), then log it in the buildathon repo with `tools/log.py`.
+
+## Our code, and where ideas came from
+Everything in `bot.py`, `src/` and `tools/` is our own code. We read other teams' public (MIT) repos for ideas and reimplemented the ones we use in our own way:
+- Free-for-all vs practice detection from deaths we didn't cause: Wolverines (varchaskukreja/TTUN), BingBU (niranjankumarnk/mech-royale).
+- Long-range dueling, heal between fights, survival-first upgrades: BingBU, Wolverines, vlad2dev, Warrior-hound.
+- Quiet loot-first opening: AbhirajTiwari12, plus our own analysis of the public showdown casts.
+- Laser cook-off targeting and lightning vs laser carriers: from `protocol.md` section 7.
+- `tools/live.py` (private play-server rooms) is adapted from jklein07/mech-royale-bot `tools/live.py` (MIT, (c) its authors); it is a test tool and is not in the image.
+
+Earlier practice submissions 6f98ca1, 587504c and e189b97 ran other teams' MIT bots (BingBU and Wolverines, with their LICENSE files) to calibrate our tools; they are not our entry.
