@@ -52,6 +52,7 @@ HUNT_R = float(_os.environ.get("HUNT_R", "210"))
 UPG2 = _os.environ.get("UPG2", "0") == "1"
 ANTI_LIGHT = _os.environ.get("ANTI_LIGHT", "0") == "1"
 FORCE_PRACTICE = _os.environ.get("FORCE_PRACTICE", "0") == "1"   # test only: never switch to FFA rules
+GHOST = _os.environ.get("GHOST", "0") == "1"          # hide also from an unseen attacker placed ~110 m along the damage bearing
 PEEK = _os.environ.get("PEEK", "0") == "1"            # weapon ready: shoot from a spot that sees the target but few other threats
 CRATES = _os.environ.get("CRATES", "0") == "1"        # shoot ground crates (1 cube, 50% weapon) when no mech is around
 STANDOFF = _os.environ.get("STANDOFF", "0") == "1"    # gun-only standoff WANT_GUN (85 m); 145 m with a laser
@@ -723,6 +724,12 @@ class Brain:
                             boost = False
                     if not ready:
                         threats = [m["pos"] for m in mechs if dist2(m["pos"], pos) < 220]
+                        if GHOST:
+                            vis_ids = {m["id"] for m in mechs}
+                            for d in getattr(self, "dmg_log", []):
+                                if t - d[0] < 3.0 and d[1] not in vis_ids and d[3] is not None:
+                                    threats.append([pos[0] + math.cos(d[3]) * 110, pos[1] + math.sin(d[3]) * 110, pos[2]])
+                                    break
                         hs = self.hide_spot(pos, threats, t)
                         if hs is not None:
                             hx, hy = hs[0] - pos[0], hs[1] - pos[1]
