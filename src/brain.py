@@ -134,11 +134,13 @@ class Brain:
             d = BAND.get(s["dist"], 200.0)
             b = s["bearing"]
             self.heat.append((x + math.cos(b) * d, y + math.sin(b) * d, t - s.get("age", 0), w))
+        # deaths we didn't cause (house bots never kill each other): cumulative, so a kill event that
+        # lags the alive count by a tick can't leave a phantom "other death" behind
         alive = obs.get("alive", 16)
-        my_kills = sum(1 for e in obs["events"] if e["type"] == "kill")
-        if getattr(self, "last_alive", None) is not None and alive < self.last_alive:
-            self.other_deaths = getattr(self, "other_deaths", 0) + max(0, self.last_alive - alive - my_kills)
-        self.last_alive = alive
+        self.total_kills = getattr(self, "total_kills", 0) + sum(1 for e in obs.get("events", []) if e.get("type") == "kill")
+        od = (16 - alive) - self.total_kills
+        if t < 330:          # late zone deaths happen in practice too: don't switch modes on them
+            self.other_deaths = max(getattr(self, "other_deaths", 0), od)
         for e in obs["events"]:
             if e["type"] == "damaged" and e.get("by") is not None:
                 self.attackers[e["by"]] = t
@@ -602,6 +604,8 @@ class Brain:
             act["move"] = [mv[0] / n * mag, mv[1] / n * mag]
         else:
             act["move"] = [0.0, 0.0]
+        if DUEL and t < OPEN_T and me["in_zone"] and t >= self.unstick_until:
+            boost = False      # quiet opening: boosting is heard 90 m away
         act["boost"] = bool(boost)
 
         # ---------------- aim, look, fire
