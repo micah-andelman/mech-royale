@@ -37,6 +37,8 @@ ENG_S = float(_os.environ.get("ENG_S", "12"))
 AVOID = float(_os.environ.get("AVOID", "0"))
 LONE = _os.environ.get("LONE", "0") == "1"
 CUBE2 = _os.environ.get("CUBE2", "1") == "1"
+HEAL = float(_os.environ.get("HEAL", "0"))
+HEAL_D = float(_os.environ.get("HEAL_D", "60"))
 CUBE_R = float(_os.environ.get("CUBE_R", "70"))
 CUBE_SAFE = float(_os.environ.get("CUBE_SAFE", "60"))
 BAND = {"near": 35.0, "mid": 110.0, "far": 240.0}
@@ -305,6 +307,12 @@ class Brain:
                     if target is None or sc > target[0]:
                         target = (sc, m)
         target = target[1] if target else None
+        evade_from = None
+        if (HEAL > 0 and target is not None and target["kind"] == "mech" and target["id"] not in recent_att
+                and hpf < HEAL and dist2(target["pos"], pos) > HEAL_D):
+            # hurt and not under fire: back off and let regen work before the next fight
+            evade_from = target["pos"]
+            target = None
 
         # ---------------- where to go
         if (self.spot is None or t - self.spot_t > 45
@@ -377,6 +385,11 @@ class Brain:
         else:
             mag = 1.0 if cube_rush else sneak
         mv = self.nav_vector(pos, goal)
+        if evade_from is not None:
+            ax, ay = pos[0] - evade_from[0], pos[1] - evade_from[1]
+            dn = math.hypot(ax, ay) or 1.0
+            mv = (ax / dn + mv[0] * 0.5, ay / dn + mv[1] * 0.5)
+            mag = 1.0
         if mv == (0.0, 0.0):
             mag = 0.0
 
