@@ -370,23 +370,15 @@ class Brain {
           this.strafeUntil = t + 0.35 + this.rng() * 0.7
         }
         strafe = this.strafeDir
-        let laserCover: [number, number] | null = null
-        if (target.charging && hasLos && map) {
+        // dodge incoming laser: hard strafe
+        if (target.charging) {
           const theirYaw = target.aim[0]
           const toMe = Math.atan2(y - tp[1], x - tp[0])
-          if (Math.abs(wrap(theirYaw - toMe)) < 0.25) {
-            boost = me.energy > (lightS >= 0 ? 45 : 10)
-            // practice: squad focus-fire makes cover-seek too passive; FFA only
-            if (this.ffa) {
-              laserCover = map.coverFrom(x, y, tp[0], tp[1], tp[2] + 8, 40)
-              if (laserCover) mode = "laser-cover"
-            }
-          }
+          if (Math.abs(wrap(theirYaw - toMe)) < 0.25) boost = me.energy > (lightS >= 0 ? 45 : 10)
         }
         const mx = dirx * radial + -diry * strafe * 0.9
         const my = diry * radial + dirx * strafe * 0.9
-        if (laserCover) moveGoal = laserCover
-        else if (map && radial > 0 && !hasLos) {
+        if (map && radial > 0 && !hasLos) {
           map.field(tp[0], tp[1])
           const st = map.fieldFor(tp[0], tp[1], 30) ? map.steer(x, y) : null
           if (st) moveGoal = [x + st[0] * 10 + -diry * strafe * 3, y + st[1] * 10 + dirx * strafe * 3]
@@ -411,33 +403,6 @@ class Brain {
       aimYaw = Math.atan2(ap[1] - y, ap[0] - x)
       aimPitch = 0
       wantAim = true
-    }
-
-    // free-for-all endgame: sit in cover inside the next circle
-    if (this.ffa && !target && !avoid && !moveGoal && !zoneGoal && o.alive <= 6 && hpFrac > 0.4 && map) {
-      const ang = Math.atan2(y - zn.next_center[1], x - zn.next_center[0])
-      const r = Math.min(zn.next_radius * 0.55, Math.max(12, dNext - 15))
-      const hx = zn.next_center[0] + Math.cos(ang) * r, hy = zn.next_center[1] + Math.sin(ang) * r
-      // prefer a cover spot from the nearest recent track / threat bearing
-      let from: [number, number, number] | null = null
-      let nearest: Track | null = null
-      for (const tr of this.tracks.values()) {
-        if (t - tr.t > 8) continue
-        if (!nearest || hyp2(x, y, tr.pos[0], tr.pos[1]) < hyp2(x, y, nearest.pos[0], nearest.pos[1])) nearest = tr
-      }
-      if (nearest) from = [nearest.pos[0], nearest.pos[1], nearest.pos[2] + 8]
-      else if (this.threatBearing != null && t - this.threatT < 6) {
-        from = [x + Math.cos(this.threatBearing) * 40, y + Math.sin(this.threatBearing) * 40, z + 8]
-      }
-      if (from) {
-        const cov = map.coverFrom(hx, hy, from[0], from[1], from[2], 35)
-        moveGoal = cov ?? [hx, hy]
-      } else moveGoal = [hx, hy]
-      mode = "hold"
-      if (from) {
-        aimYaw = Math.atan2(from[1] - y, from[0] - x)
-        wantAim = true
-      }
     }
 
     // heal: hold still (silent) out of sight until HP is back

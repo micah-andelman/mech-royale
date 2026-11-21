@@ -104,6 +104,8 @@ def main():
     ap.add_argument("--map", required=True, help="local arena dir passed to the bot as hello.map.dir")
     ap.add_argument("--out", default="runs/live")
     ap.add_argument("--name", default="fpt-bot")
+    ap.add_argument("--wait-players", type=int, default=1, help="host: start only once this many players are in the lobby")
+    ap.add_argument("--code-file", default=None, help="host: write the room code here so other bots can join")
     ap.add_argument("--hello-map-dir", default=None, help="map dir to tell the bot (e.g. /arena for a docker bot)")
     ap.add_argument("--spectate", action="store_true", help="also record the public spectator feed")
     ap.add_argument("--code", default=None, help="join an existing private match code instead of creating one")
@@ -117,6 +119,8 @@ def main():
     info = json.loads(urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "mech-bot-bridge"}), timeout=10).read())
     print("room", info, file=sys.stderr)
     room, code = info["room"], info["code"]
+    if a.code_file and not a.code:
+        open(a.code_file, "w").write(code)
     path = f"/r/{room}/play?token=&sid={sid}&name={a.name}&code={code}"
     ws = WS(path)
     log = open(os.path.join(a.out, f"{time.strftime('%Y%m%d-%H%M%S')}-{code}.jsonl"), "w")
@@ -174,7 +178,7 @@ def main():
             you = m.get("you", {})
             if not you.get("ready"):
                 ws.send({"type": "ready", "name": a.name})
-            if you.get("host") and m.get("phase") == "waiting" and not started:
+            if you.get("host") and m.get("phase") == "waiting" and not started and m.get("count", 1) >= a.wait_players and all(p.get("ready") for p in m.get("players", [])):
                 started = True
                 time.sleep(1.0)
                 ws.send({"type": "start"})
