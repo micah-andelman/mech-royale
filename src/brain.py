@@ -51,6 +51,7 @@ WANT = float(_os.environ.get("WANT", "145"))          # standoff distance in hun
 HUNT_R = float(_os.environ.get("HUNT_R", "210"))
 UPG2 = _os.environ.get("UPG2", "0") == "1"
 ANTI_LIGHT = _os.environ.get("ANTI_LIGHT", "0") == "1"
+FORCE_PRACTICE = _os.environ.get("FORCE_PRACTICE", "0") == "1"   # test only: never switch to FFA rules
 GRAB = _os.environ.get("GRAB", "0") == "1"            # unarmed + laser/lightning within 60 m: grab it even under fire
 FAST = _os.environ.get("FAST", "0") == "1"            # practice: walk at full speed (sneak only in FFA); no stuck trips while charging
 FACE = _os.environ.get("FACE", "0") == "1"            # face unseen attackers, switch to the top damager, never show our back
@@ -365,7 +366,7 @@ class Brain:
             if score is not None and (target is None or score > target[0]):
                 target = (score, m)
         # ---- DUEL posture (our design spec): quiet opening, then practice duelist or FFA filter
-        self.ffa = getattr(self, "other_deaths", 0) >= 2
+        self.ffa = getattr(self, "other_deaths", 0) >= 2 and not FORCE_PRACTICE
         if DUEL:
             target = None
             evade_from = None
@@ -424,7 +425,7 @@ class Brain:
             self.duel_heal = target is None and getattr(self, "regen", False)
         # hunt mode (practice squad): every house bot has to die, so fight anything in view from long range,
         # backing off only to regenerate. Two deaths we did not cause mean a free-for-all: back to v6 rules.
-        self.ffa = getattr(self, "other_deaths", 0) >= 2
+        self.ffa = getattr(self, "other_deaths", 0) >= 2 and not FORCE_PRACTICE
         hunting = HUNT and not self.ffa
         if hunting:
             if getattr(self, "regen", False) and hpf > 0.85:
