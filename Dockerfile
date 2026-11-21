@@ -5,5 +5,6 @@ COPY src/ ./src/
 # posture switches (see src/brain.py): HUNT=1 practice hunter (fight everything in view from ~145 m, regen when losing, FFA rules once 2 deaths we did not cause); DUEL=1 v10 posture
 ARG DUEL=0
 ARG HUNT=1
-ENV DUEL=$DUEL HUNT=$HUNT
+ARG LASER_FIRST=1
+ENV DUEL=$DUEL HUNT=$HUNT LASER_FIRST=$LASER_FIRST
 ENTRYPOINT ["python3", "-u", "/bot/bot.py"]

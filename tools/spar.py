@@ -21,7 +21,7 @@ for k in range(a.n):
     code_file = os.path.join(out, "code")
     procs = []
     for i, (name, image) in enumerate(bots):
-        cmd = f"docker run --rm -i --network none --cpus 1 --memory 512m --user 65534:65534 -v {arena}:/arena:ro {image}"
+        cmd = f"docker run --rm -i --network none --cpus 1 --cpuset-cpus=8-23 --memory 512m --user 65534:65534 -v {arena}:/arena:ro {image}"
         args = [sys.executable, os.path.join(root, "tools", "live.py"), "--bot", cmd, "--map", arena, "--hello-map-dir", "/arena",
                 "--out", os.path.join(out, name), "--name", name]
         if i == 0:

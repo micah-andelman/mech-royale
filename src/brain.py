@@ -50,6 +50,8 @@ HUNT = _os.environ.get("HUNT", "0") == "1"          # practice: hunt every house
 WANT = float(_os.environ.get("WANT", "145"))          # standoff distance in hunt fights
 HUNT_R = float(_os.environ.get("HUNT_R", "210"))
 UPG2 = _os.environ.get("UPG2", "0") == "1"
+ANTI_LIGHT = _os.environ.get("ANTI_LIGHT", "0") == "1"
+LASER_FIRST = _os.environ.get("LASER_FIRST", "0") == "1"   # get a laser/lightning before hunting; remember pickups
 DUEL = _os.environ.get("DUEL", "0") == "1"          # spec posture: opening -> practice duelist / FFA filter
 OPEN_T = float(_os.environ.get("OPEN_T", "30"))       # quiet opening length (s)
 DUEL_R = float(_os.environ.get("DUEL_R", "150"))      # practice: take 1v1s inside this range
@@ -146,6 +148,15 @@ class Brain:
                 self.attackers[e["by"]] = t
                 if e.get("bearing") is not None:
                     self.last_dmg = (t, e["bearing"])
+        pm = getattr(self, "pk_mem", {})
+        here = {p["id"] for p in obs.get("pickups", [])}
+        for p in obs.get("pickups", []):
+            pm[p["id"]] = (t, p["pos"], p["kind"])
+        for i in list(pm):
+            pt, pp, _ = pm[i]
+            if t - pt > 60 or (i not in here and dist2(pp, (x, y)) < 35):
+                del pm[i]          # stale, or we're looking at the spot and it's gone
+        self.pk_mem = pm
         for d in obs.get("drops", []):
             self.drops_seen[d["id"]] = d["pos"]
         self.heat = [h for h in self.heat if t - h[2] < 40][-200:]
@@ -295,6 +306,11 @@ class Brain:
         for i in recent_att:
             self.engaged[i] = t
 
+        if LASER_FIRST:
+            armed0 = any(w and w["kind"] in ("laser", "lightning") for w in me["weapons"])
+            self.want_loot = (not armed0) and t < 200 and any(
+                v[2] in ("laser", "lightning") and dist2(v[1], pos) < 220 and abs(v[1][2] - pos[2]) < 4
+                for v in getattr(self, "pk_mem", {}).values())
         # ---------------- pick a combat target
         target = None
         for m in mechs:
@@ -383,6 +399,8 @@ class Brain:
             if getattr(self, "regen", False) and hpf > 0.85:
                 self.regen = False
             vis = [m for m in mechs if dist2(m["pos"], pos) < HUNT_R]
+            if LASER_FIRST and getattr(self, "want_loot", False):
+                vis = [m for m in vis if m["id"] in recent_att or dist2(m["pos"], pos) < 50]
             cur = getattr(self, "last_tgt", None)
             best = None
             for m in vis:
@@ -432,17 +450,27 @@ class Brain:
         goal = self.spot
         loot_goal = None
         calm = target is None and not recent_att and all(t - s[0] > 5 for s in self.seen.values())
+        armed = any(w and w["kind"] in ("laser", "lightning") for w in me["weapons"])
+        if LASER_FIRST and not armed and not recent_att and getattr(self, "want_loot", False):
+            calm = True
         if calm:
             slot1 = me["weapons"][1]
             have = {wp["kind"] for wp in me["weapons"] if wp}
             best = None
-            for p in obs["pickups"]:
+            pool = list(obs["pickups"])
+            if LASER_FIRST:
+                seen_ids = {p["id"] for p in pool}
+                pool += [{"id": i, "pos": v[1], "kind": v[2]} for i, v in getattr(self, "pk_mem", {}).items() if i not in seen_ids]
+            for p in pool:
                 if p["kind"] in have or WEAPON_PREF.get(p["kind"], 0) < 2:
                     continue
                 if slot1 is not None and WEAPON_PREF.get(slot1["kind"], 0) >= WEAPON_PREF[p["kind"]]:
                     continue
                 dp = dist2(p["pos"], pos)
-                if dp < (LOOT_R if t < LOOT_T else 45) and self.time_safe(z, t, p["pos"]) > 20 and abs(p["pos"][2] - pos[2]) < 4:
+                lr = (LOOT_R if t < LOOT_T else 45)
+                if LASER_FIRST and not armed:
+                    lr = 220.0
+                if dp < lr and self.time_safe(z, t, p["pos"]) > 20 and abs(p["pos"][2] - pos[2]) < 4:
                     if best is None or dp < best[0]:
                         best = (dp, p)
             if best:
@@ -543,6 +571,10 @@ class Brain:
                         want = dd                               # inside the band: just strafe
                 else:
                     want = 30.0 if (light and target.get("hp", 1400) < 500 and dd < 70) else WANT
+                # an enemy lightning (43 m) out-damages our gun up close: open the gap unless we hold one too
+                t_kinds = {(w["kind"] if isinstance(w, dict) else w) for w in (target.get("weapons") or []) if w}
+                if ANTI_LIGHT and "lightning" in t_kinds and not light and dd < 70:
+                    want = max(want, 90.0)
                 radial = max(-1.0, min(1.0, (dd - want) / 30.0))
                 fwd = (dvec[0] / dd, dvec[1] / dd)
                 mvx = fwd[0] * radial + perp[0] * self.strafe * 0.8
@@ -558,7 +590,7 @@ class Brain:
                     mvx, mvy = mvx - pull * rx / rd, mvy - pull * ry / rd
                 mv = (mvx, mvy)
                 mag = 1.0
-                boost = dd < 80 and want > 100 and me["energy"] > 35
+                boost = dd < 80 and want >= 90 and me["energy"] > 35
             elif hpf < FLEE or len(recent_att) > 1:
                 # break off: back away toward our spot while still facing them
                 away = (-dvec[0] / dd, -dvec[1] / dd)
