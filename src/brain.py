@@ -12,6 +12,11 @@ from .world import Path, World
 
 TAU = 2 * math.pi
 
+UPGRADE_ORDER_HUNT = [
+    "armor", "plating", "nanites", "servos", "laser_damage", "gun_damage", "lightning_efficiency", "gun_rate",
+    "laser_charge", "reactor", "capacitor", "jets", "gyros", "gun_mag", "sensors", "gun_velocity",
+    "lightning_chain", "lightning_range", "laser_pierce", "mortar_reload", "mortar_splash", "mortar_velocity",
+]
 UPGRADE_ORDER = [
     "plating", "armor", "nanites", "sensors", "capacitor", "reactor", "jets", "gyros", "servos",
     "lightning_efficiency", "laser_charge", "laser_damage", "gun_rate", "gun_damage", "gun_velocity",
@@ -41,6 +46,10 @@ HEAL = float(_os.environ.get("HEAL", "0"))
 HEAL_D = float(_os.environ.get("HEAL_D", "60"))
 CUBE_R = float(_os.environ.get("CUBE_R", "70"))
 CUBE_SAFE = float(_os.environ.get("CUBE_SAFE", "60"))
+HUNT = _os.environ.get("HUNT", "0") == "1"          # practice: hunt every house bot from long range
+WANT = float(_os.environ.get("WANT", "145"))          # standoff distance in hunt fights
+HUNT_R = float(_os.environ.get("HUNT_R", "210"))
+UPG2 = _os.environ.get("UPG2", "0") == "1"
 BAND = {"near": 35.0, "mid": 110.0, "far": 240.0}
 
 
@@ -120,6 +129,11 @@ class Brain:
             d = BAND.get(s["dist"], 200.0)
             b = s["bearing"]
             self.heat.append((x + math.cos(b) * d, y + math.sin(b) * d, t - s.get("age", 0), w))
+        alive = obs.get("alive", 16)
+        my_kills = sum(1 for e in obs["events"] if e["type"] == "kill")
+        if getattr(self, "last_alive", None) is not None and alive < self.last_alive:
+            self.other_deaths = getattr(self, "other_deaths", 0) + max(0, self.last_alive - alive - my_kills)
+        self.last_alive = alive
         for e in obs["events"]:
             if e["type"] == "damaged" and e.get("by") is not None:
                 self.attackers[e["by"]] = t
@@ -262,7 +276,7 @@ class Brain:
         # upgrades
         if obs.get("offer"):
             ch = obs["offer"]["choices"]
-            rank = {u: i for i, u in enumerate(UPGRADE_ORDER)}
+            rank = {u: i for i, u in enumerate(UPGRADE_ORDER_HUNT if (UPG2 or HUNT) else UPGRADE_ORDER)}
             act["pick"] = min(range(len(ch)), key=lambda i: rank.get(ch[i]["id"], 99))
 
         hpf = me["hp"] / max(1.0, me["max_hp"])
@@ -296,6 +310,33 @@ class Brain:
                     score = 70 - d / 10
             if score is not None and (target is None or score > target[0]):
                 target = (score, m)
+        # hunt mode (practice squad): every house bot has to die, so fight anything in view from long range,
+        # backing off only to regenerate. Two deaths we did not cause mean a free-for-all: back to v6 rules.
+        self.ffa = getattr(self, "other_deaths", 0) >= 2
+        hunting = HUNT and not self.ffa
+        if hunting:
+            if getattr(self, "regen", False) and hpf > 0.85:
+                self.regen = False
+            vis = [m for m in mechs if dist2(m["pos"], pos) < HUNT_R]
+            cur = getattr(self, "last_tgt", None)
+            best = None
+            for m in vis:
+                d = dist2(m["pos"], pos)
+                pr = m.get("hp", 1400) + 3 * d - (150 if m["id"] in recent_att else 0) - (200 if m["id"] == cur else 0)
+                if best is None or pr < best[0]:
+                    best = (pr, m)
+            if best:
+                m = best[1]
+                thr = len([x for x in vis if x["id"] in recent_att or dist2(x["pos"], pos) < 60])
+                losing = me["hp"] < m.get("hp", 1400) * 0.8
+                if (hpf < 0.4 and losing and m.get("hp", 1400) > 250) or (thr >= 3 and hpf < 0.6):
+                    self.regen = True
+                if not getattr(self, "regen", False) or m.get("hp", 1400) < 200 or dist2(m["pos"], pos) < 35:
+                    target = (999, m)
+                    self.last_tgt = m["id"]
+                else:
+                    target = None
+                    self.hunt_evade = (m["pos"][0], m["pos"][1], t)
         if target is not None and target[1]["kind"] == "mech":
             self.engaged[target[1]["id"]] = t
         if target is None:
@@ -313,6 +354,10 @@ class Brain:
             # hurt and not under fire: back off and let regen work before the next fight
             evade_from = target["pos"]
             target = None
+
+        he = getattr(self, "hunt_evade", None)
+        if hunting and target is None and he and t - he[2] < 3.0:
+            evade_from = he[:2]
 
         # ---------------- where to go
         if (self.spot is None or t - self.spot_t > 45
@@ -415,7 +460,26 @@ class Brain:
                 self.strafe = -self.strafe
                 self.strafe_t = t
                 self.strafe_len = self.rng.uniform(STRAFE_MIN, STRAFE_MAX)
-            if hpf < FLEE or len(recent_att) > 1:
+            if hunting and target["kind"] == "mech":
+                light = any(w and w["kind"] == "lightning" for w in me["weapons"]) and me["energy"] > 20
+                want = 30.0 if (light and target.get("hp", 1400) < 500 and dd < 70) else WANT
+                radial = max(-1.0, min(1.0, (dd - want) / 30.0))
+                fwd = (dvec[0] / dd, dvec[1] / dd)
+                mvx = fwd[0] * radial + perp[0] * self.strafe * 0.8
+                mvy = fwd[1] * radial + perp[1] * self.strafe * 0.8
+                zc, zr = self.zone_at(z, t + 3.0)
+                rx, ry = pos[0] - zc[0], pos[1] - zc[1]
+                rd = math.hypot(rx, ry) or 1.0
+                if rd > zr * ZONE_EDGE or not me["in_zone"]:
+                    out = (mvx * rx + mvy * ry) / rd
+                    if out > 0:
+                        mvx, mvy = mvx - out * rx / rd, mvy - out * ry / rd
+                    pull = 1.5 if not me["in_zone"] else 0.6
+                    mvx, mvy = mvx - pull * rx / rd, mvy - pull * ry / rd
+                mv = (mvx, mvy)
+                mag = 1.0
+                boost = dd < 80 and want > 100 and me["energy"] > 35
+            elif hpf < FLEE or len(recent_att) > 1:
                 # break off: back away toward our spot while still facing them
                 away = (-dvec[0] / dd, -dvec[1] / dd)
                 zc, zr = self.zone_at(z, t + 3.0)

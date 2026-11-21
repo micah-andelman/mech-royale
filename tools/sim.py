@@ -13,6 +13,8 @@ Usage:
 import argparse
 import json
 import math
+import os as _os_cal
+CAL = _os_cal.environ.get("SIM_CAL", "0") == "1"
 import os
 import random
 import sys
@@ -433,8 +435,16 @@ class Sim:
             o = min(vis, key=lambda o: math.dist(o.pos, m.pos))
             d = math.dist(o.pos[:2], m.pos[:2])
             lead = d / self.cfg["weapons"]["gun"]["speed"] if m.skill_err < 0.05 else 0.0
+            err = m.skill_err
+            if CAL:
+                # public replays (via BingBU notes): medium bots land nothing past 120 m, hard ~13%;
+                # only hard/expert lead, and everyone's aim falls apart past their tier's range
+                cap = {0.07: 80.0, 0.045: 120.0, 0.03: 170.0, 0.018: 230.0}.get(m.skill_err, 200.0)
+                lead = lead if m.skill_err <= 0.03 else 0.0
+                if d > cap:
+                    err = 0.12
             tx, ty = o.pos[0] + o.vel[0] * lead, o.pos[1] + o.vel[1] * lead
-            yaw = math.atan2(ty - m.pos[1], tx - m.pos[0]) + random.gauss(0, m.skill_err)
+            yaw = math.atan2(ty - m.pos[1], tx - m.pos[0]) + random.gauss(0, err)
             pitch = math.atan2(o.pos[2] + 4.5 - (m.pos[2] + 7), max(d, 1.0))
             cmd["aim"] = [yaw, pitch]
             if d > 50 and (self.mode != "squad" or m.id in self.hunters or self.t > 300):
