@@ -51,6 +51,7 @@ WANT = float(_os.environ.get("WANT", "145"))          # standoff distance in hun
 HUNT_R = float(_os.environ.get("HUNT_R", "210"))
 UPG2 = _os.environ.get("UPG2", "0") == "1"
 ANTI_LIGHT = _os.environ.get("ANTI_LIGHT", "0") == "1"
+FAST = _os.environ.get("FAST", "0") == "1"            # practice: walk at full speed (sneak only in FFA); no stuck trips while charging
 FACE = _os.environ.get("FACE", "0") == "1"            # face unseen attackers, switch to the top damager, never show our back
 COVER = _os.environ.get("COVER", "0") == "1"          # step out of the target's sight while our weapons reload
 FIRE_ALL = _os.environ.get("FIRE_ALL", "0") == "1"   # shoot the best visible mech in every mode
@@ -550,7 +551,7 @@ class Brain:
             mag = 1.0
             boost = need > walk and me["energy"] > 35
         else:
-            mag = 1.0 if cube_rush else sneak
+            mag = 1.0 if (cube_rush or (FAST and not getattr(self, "ffa", False))) else sneak
             if DUEL and getattr(self, "duel_heal", False) and evade_from is None and not cube_rush:
                 mag = 0.0      # heal to full: stand still and let regen work
         mv = self.nav_vector(pos, goal)
@@ -678,7 +679,8 @@ class Brain:
             mag = 1.0
             act["jump"] = me["grounded"]
             boost = me["energy"] > 10
-        elif mag > 0.3 and self.stuck(t):
+        elif mag > 0.3 and not (FAST and any(
+                w and w["kind"] == "laser" and w.get("charge", 0) > 0 for w in me["weapons"])) and self.stuck(t):
             a = math.atan2(mv[1], mv[0]) + self.rng.choice((-1, 1)) * self.rng.uniform(0.8, 1.6)
             self.unstick_dir = (math.cos(a), math.sin(a))
             self.unstick_until = t + 0.8
