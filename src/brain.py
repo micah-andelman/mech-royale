@@ -52,7 +52,10 @@ HUNT_R = float(_os.environ.get("HUNT_R", "210"))
 UPG2 = _os.environ.get("UPG2", "0") == "1"
 ANTI_LIGHT = _os.environ.get("ANTI_LIGHT", "0") == "1"
 FORCE_PRACTICE = _os.environ.get("FORCE_PRACTICE", "0") == "1"   # test only: never switch to FFA rules
-B18 = _os.environ.get("B18", "0") == "1"              # gun standoff 85 m, finish <30%, fire in every mode (not while regen-hiding), mid-fight cubes
+STANDOFF = _os.environ.get("STANDOFF", "0") == "1"    # gun-only standoff WANT_GUN (85 m); 145 m with a laser
+FINISH = _os.environ.get("FINISH", "0") == "1"        # finish targets under 30% max HP even while in regen
+FIRE_ANY = _os.environ.get("FIRE_ANY", "0") == "1"    # shoot the best visible mech in every mode except while regen-hiding
+MIDCUBE = _os.environ.get("MIDCUBE", "0") == "1"      # step onto cubes mid-fight (measured harmful by Th3r0n; keep off)
 WANT_GUN = float(_os.environ.get("WANT_GUN", "85"))
 GRAB = _os.environ.get("GRAB", "0") == "1"            # unarmed + laser/lightning within 60 m: grab it even under fire
 FAST = _os.environ.get("FAST", "0") == "1"            # practice: walk at full speed (sneak only in FFA); no stuck trips while charging
@@ -448,7 +451,7 @@ class Brain:
                 losing = me["hp"] < m.get("hp", 1400) * 0.8
                 if (hpf < 0.4 and losing and m.get("hp", 1400) > 250) or (thr >= 3 and hpf < 0.6):
                     self.regen = True
-                low = m.get("hp", 1400) < (0.3 * m.get("max_hp", 1400) if B18 else 200)
+                low = m.get("hp", 1400) < (0.3 * m.get("max_hp", 1400) if FINISH else 200)
                 if not getattr(self, "regen", False) or low or dist2(m["pos"], pos) < 35:
                     target = (999, m)
                     self.last_tgt = m["id"]
@@ -530,7 +533,7 @@ class Brain:
                         loot_goal = (c["pos"][0], c["pos"][1])
                         break
         cube_rush = False
-        if B18 and loot_goal is None and target is not None and me["cubes"] < 10 and me["in_zone"]:
+        if MIDCUBE and loot_goal is None and target is not None and me["cubes"] < 10 and me["in_zone"]:
             # mid-fight cubes: step onto one within 25 m if no other mech is closer to it (+4% HP/damage, heals)
             for c in obs["cubes"]:
                 dc = dist2(c["pos"], pos)
@@ -620,7 +623,7 @@ class Brain:
                         want = dd                               # inside the band: just strafe
                 else:
                     want = 30.0 if (light and target.get("hp", 1400) < 500 and dd < 70) else WANT
-                    if B18 and want > 100 and not any(w and w["kind"] == "laser" for w in me["weapons"]):
+                    if STANDOFF and want > 100 and not any(w and w["kind"] == "laser" for w in me["weapons"]):
                         want = WANT_GUN      # gun-only: bullets are dodged and spread past ~110 m
                 # an enemy lightning (43 m) out-damages our gun up close: open the gap unless we hold one too
                 t_kinds = {(w["kind"] if isinstance(w, dict) else w) for w in (target.get("weapons") or []) if w}
@@ -736,7 +739,7 @@ class Brain:
                     if last:
                         unseen_bearing = last[-1][3]      # shot by someone we can't see: face it now
         aim_tgt = target
-        if aim_tgt is None and (FIRE_ALL or (B18 and not getattr(self, "regen", False))) and mechs:
+        if aim_tgt is None and (FIRE_ALL or (FIRE_ANY and not getattr(self, "regen", False))) and mechs:
             # fire in every mode: shoot the best visible mech even while looting or moving
             cand = [m for m in mechs if dist2(m["pos"], pos) < 200]
             if cand:
