@@ -3,3 +3,4 @@ tools/
 logs/
 .git/
 *.md
+rust/target/

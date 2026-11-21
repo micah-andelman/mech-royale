@@ -104,6 +104,7 @@ def main():
     ap.add_argument("--map", required=True, help="local arena dir passed to the bot as hello.map.dir")
     ap.add_argument("--out", default="runs/live")
     ap.add_argument("--name", default="fpt-bot")
+    ap.add_argument("--hello-map-dir", default=None, help="map dir to tell the bot (e.g. /arena for a docker bot)")
     ap.add_argument("--spectate", action="store_true", help="also record the public spectator feed")
     ap.add_argument("--code", default=None, help="join an existing private match code instead of creating one")
     a = ap.parse_args()
@@ -179,7 +180,7 @@ def main():
                 ws.send({"type": "start"})
                 print("start sent", file=sys.stderr)
         elif ty == "hello":
-            m["map"]["dir"] = os.path.abspath(a.map)
+            m["map"]["dir"] = a.hello_map_dir or os.path.abspath(a.map)
             bot = subprocess.Popen(a.bot.split(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(os.path.join(a.out, "bot.stderr"), "a"))
             threading.Thread(target=bot_reader, args=(bot,), daemon=True).start()
             bot.stdin.write((json.dumps(m) + "\n").encode())
