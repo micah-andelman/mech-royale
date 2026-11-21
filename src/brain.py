@@ -64,6 +64,7 @@ STANDOFF = _os.environ.get("STANDOFF", "0") == "1"    # gun-only standoff WANT_G
 FINISH = _os.environ.get("FINISH", "0") == "1"        # finish targets under 30% max HP even while in regen
 FIRE_ANY = _os.environ.get("FIRE_ANY", "0") == "1"    # shoot the best visible mech in every mode except while regen-hiding
 UPG3 = _os.environ.get("UPG3", "0") == "1"              # mobility upgrades (servos, jets, reactor) right after plating + armor
+LETHAL = _os.environ.get("LETHAL", "0") == "1"          # release a partial laser charge early when it already kills the target
 BOOSTFIGHT = _os.environ.get("BOOSTFIGHT", "0") == "1"  # boost while moving in any fight, energy hysteresis (off <30, on >60)
 MIDCUBE = _os.environ.get("MIDCUBE", "0") == "1"      # step onto cubes mid-fight (measured harmful by Th3r0n; keep off)
 WANT_GUN = float(_os.environ.get("WANT_GUN", "85"))
@@ -877,7 +878,13 @@ class Brain:
                             self.laser_full_t = None
                         hold = self.cfg.get("weapons", {}).get("laser", {}).get("hold_s", 2.0)
                         near_auto = full and t - self.laser_full_t > hold - 0.35
-                        if full and (on or near_auto):
+                        lethal = False
+                        if (LETHAL and on and not full and aim_tgt.get("kind") == "mech" and aim_tgt.get("hp") is not None
+                                and charge >= s.get("min_charge", 0.15)):
+                            mf = s.get("min_frac", 0.35)
+                            est = s["damage"] * (mf + (1 - mf) * min(1.0, charge / max(s["charge"], 1e-3)))
+                            lethal = est * 0.85 >= aim_tgt["hp"]
+                        if lethal or (full and (on or near_auto)):
                             fire[i] = False  # let go: fire (on target, or before the hold timer fires it anyway)
                         else:
                             fire[i] = True   # keep charging / hold until aligned
