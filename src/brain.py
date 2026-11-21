@@ -58,6 +58,7 @@ CRATES = _os.environ.get("CRATES", "0") == "1"        # shoot ground crates (1 c
 STANDOFF = _os.environ.get("STANDOFF", "0") == "1"    # gun-only standoff WANT_GUN (85 m); 145 m with a laser
 FINISH = _os.environ.get("FINISH", "0") == "1"        # finish targets under 30% max HP even while in regen
 FIRE_ANY = _os.environ.get("FIRE_ANY", "0") == "1"    # shoot the best visible mech in every mode except while regen-hiding
+BOOSTFIGHT = _os.environ.get("BOOSTFIGHT", "0") == "1"  # boost while moving in any fight, energy hysteresis (off <30, on >60)
 MIDCUBE = _os.environ.get("MIDCUBE", "0") == "1"      # step onto cubes mid-fight (measured harmful by Th3r0n; keep off)
 WANT_GUN = float(_os.environ.get("WANT_GUN", "85"))
 GRAB = _os.environ.get("GRAB", "0") == "1"            # unarmed + laser/lightning within 60 m: grab it even under fire
@@ -759,6 +760,15 @@ class Brain:
                 mv = (perp[0] * self.strafe + mv[0] * keep, perp[1] * self.strafe + mv[1] * keep)
                 mag = 1.0
                 boost = me["energy"] > STRAFE_BOOST_E
+        if BOOSTFIGHT:
+            e = me["energy"]
+            if e < 30:
+                self.boost_on = False
+            elif e > 60:
+                self.boost_on = True
+            if (target is not None and target.get("kind") == "mech" and mag > 0.7
+                    and getattr(self, "boost_on", True) and math.hypot(*mv) > 1e-6):
+                boost = True
         # dodge charged lasers aimed at us
         for m in mechs:
             if m.get("charging"):
