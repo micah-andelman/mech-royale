@@ -52,6 +52,7 @@ HUNT_R = float(_os.environ.get("HUNT_R", "210"))
 UPG2 = _os.environ.get("UPG2", "0") == "1"
 ANTI_LIGHT = _os.environ.get("ANTI_LIGHT", "0") == "1"
 FORCE_PRACTICE = _os.environ.get("FORCE_PRACTICE", "0") == "1"   # test only: never switch to FFA rules
+CRATES = _os.environ.get("CRATES", "0") == "1"        # shoot ground crates (1 cube, 50% weapon) when no mech is around
 STANDOFF = _os.environ.get("STANDOFF", "0") == "1"    # gun-only standoff WANT_GUN (85 m); 145 m with a laser
 FINISH = _os.environ.get("FINISH", "0") == "1"        # finish targets under 30% max HP even while in regen
 FIRE_ANY = _os.environ.get("FIRE_ANY", "0") == "1"    # shoot the best visible mech in every mode except while regen-hiding
@@ -468,6 +469,17 @@ class Brain:
                     sc = 30 - d / 10
                     if target is None or sc > target[0]:
                         target = (sc, m)
+        if (CRATES and target is None and not mechs and hpf > 0.7 and not recent_att and me["in_zone"]
+                and all(t - sv[0] > 6 for sv in self.seen.values())):
+            best_c = None
+            for c in obs.get("crates", []):
+                dcr = dist2(c["pos"], pos)
+                if dcr < 120 and abs(c["pos"][2] - pos[2]) < 4 and self.time_safe(z, t, c["pos"]) > 25:
+                    if best_c is None or dcr < best_c[0]:
+                        best_c = (dcr, c)
+            if best_c:
+                c = best_c[1]
+                target = (1, {"id": c["id"], "pos": c["pos"], "kind": "crate", "vel": [0, 0, 0], "hp": c.get("hp", 300)})
         target = target[1] if target else None
         evade_from = getattr(self, "duel_evade", None) if DUEL else None
         if (HEAL > 0 and target is not None and target["kind"] == "mech" and target["id"] not in recent_att
@@ -604,7 +616,16 @@ class Brain:
         if zone_urgent and target is not None:
             mag = 1.0
             boost = me["energy"] > 15
-        if target is not None and not zone_urgent and not (getattr(self, "grabbing", False) and loot_goal is not None):
+        if target is not None and target.get("kind") == "crate" and not zone_urgent:
+            dcx, dcy = target["pos"][0] - pos[0], target["pos"][1] - pos[1]
+            dcd = math.hypot(dcx, dcy)
+            if dcd > 30:
+                mv = self.nav_vector(pos, (target["pos"][0], target["pos"][1]))
+                mag = 1.0
+            else:
+                mv, mag = (0.0, 0.0), 0.0
+            boost = False
+        elif target is not None and not zone_urgent and not (getattr(self, "grabbing", False) and loot_goal is not None):
             dvec = (target["pos"][0] - pos[0], target["pos"][1] - pos[1])
             dd = math.hypot(*dvec) or 1.0
             perp = (-dvec[1] / dd, dvec[0] / dd)
