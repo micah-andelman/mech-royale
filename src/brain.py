@@ -52,6 +52,7 @@ HUNT_R = float(_os.environ.get("HUNT_R", "210"))
 UPG2 = _os.environ.get("UPG2", "0") == "1"
 ANTI_LIGHT = _os.environ.get("ANTI_LIGHT", "0") == "1"
 FORCE_PRACTICE = _os.environ.get("FORCE_PRACTICE", "0") == "1"   # test only: never switch to FFA rules
+PEEK = _os.environ.get("PEEK", "0") == "1"            # weapon ready: shoot from a spot that sees the target but few other threats
 CRATES = _os.environ.get("CRATES", "0") == "1"        # shoot ground crates (1 cube, 50% weapon) when no mech is around
 STANDOFF = _os.environ.get("STANDOFF", "0") == "1"    # gun-only standoff WANT_GUN (85 m); 145 m with a laser
 FINISH = _os.environ.get("FINISH", "0") == "1"        # finish targets under 30% max HP even while in regen
@@ -318,6 +319,35 @@ class Brain:
                 break
         self._hide = (t, best, (pos[0], pos[1]))
         return best
+
+    def peek_spot(self, pos, tgt, others, want, t):
+        """Spot within ~12 m that sees the target (eye to chest) and as few other threats as possible."""
+        ps = getattr(self, "_peek", None)
+        if ps and t - ps[0] < 0.5 and dist2(ps[2], pos) < 4 and ps[3] == tgt["id"]:
+            return ps[1]
+        g = self.w.ground_at
+        tc = (tgt["pos"][0], tgt["pos"][1], tgt["pos"][2] + 4.5)
+        best = None
+        for r in (0.0, 4.0, 8.0, 12.0):
+            for k in range(1 if r == 0 else 12):
+                a = k * TAU / 12
+                q = (pos[0] + math.cos(a) * r, pos[1] + math.sin(a) * r)
+                if r > 0:
+                    I, J = self.w.nidx(*q)
+                    if not self.w.nfree(I, J) or not self.w.line_free(pos, q):
+                        continue
+                eye = (q[0], q[1], g(*q) + 8.0)
+                if not self.w.los(eye, tc):
+                    continue
+                chest = (q[0], q[1], g(*q) + 4.5)
+                exp = sum(1 for m in others if self.w.los((m[0], m[1], m[2] + 8.0), chest))
+                dq = dist2(q, tgt["pos"])
+                sc = 40 * exp + 0.5 * abs(dq - want) + 1.0 * r
+                if best is None or sc < best[0]:
+                    best = (sc, q)
+        q = best[1] if best else None
+        self._peek = (t, q, (pos[0], pos[1]), tgt["id"])
+        return q
 
     # ------------------------------------------------------------------ main
     def act(self, obs):
@@ -677,6 +707,20 @@ class Brain:
                             ready = True
                         elif wpn["kind"] == "lightning" and dd < 45 and me["energy"] > 10:
                             ready = True
+                    if ready and PEEK:
+                        others = [m["pos"] for m in mechs if m["id"] != target["id"] and dist2(m["pos"], pos) < 220]
+                        pk = self.peek_spot(pos, target, others, want, t)
+                        if pk is not None:
+                            px, py = pk[0] - pos[0], pk[1] - pos[1]
+                            pn = math.hypot(px, py)
+                            if pn > 1.5:
+                                mv = (px / pn, py / pn)
+                                mag = 1.0
+                            else:
+                                # at the spot: small strafe only, so we keep the angle
+                                mv = (perp[0] * self.strafe, perp[1] * self.strafe)
+                                mag = 0.5
+                            boost = False
                     if not ready:
                         threats = [m["pos"] for m in mechs if dist2(m["pos"], pos) < 220]
                         hs = self.hide_spot(pos, threats, t)
