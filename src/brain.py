@@ -51,6 +51,7 @@ WANT = float(_os.environ.get("WANT", "145"))          # standoff distance in hun
 HUNT_R = float(_os.environ.get("HUNT_R", "210"))
 UPG2 = _os.environ.get("UPG2", "0") == "1"
 ANTI_LIGHT = _os.environ.get("ANTI_LIGHT", "0") == "1"
+GRAB = _os.environ.get("GRAB", "0") == "1"            # unarmed + laser/lightning within 60 m: grab it even under fire
 FAST = _os.environ.get("FAST", "0") == "1"            # practice: walk at full speed (sneak only in FFA); no stuck trips while charging
 FACE = _os.environ.get("FACE", "0") == "1"            # face unseen attackers, switch to the top damager, never show our back
 COVER = _os.environ.get("COVER", "0") == "1"          # step out of the target's sight while our weapons reload
@@ -483,6 +484,12 @@ class Brain:
         armed = any(w and w["kind"] in ("laser", "lightning") for w in me["weapons"])
         if LASER_FIRST and not armed and not recent_att and getattr(self, "want_loot", False):
             calm = True
+        self.grabbing = False
+        if GRAB and not armed and me["in_zone"] and any(
+                v[2] in ("laser", "lightning") and dist2(v[1], pos) < 60 and abs(v[1][2] - pos[2]) < 4
+                for v in getattr(self, "pk_mem", {}).values()):
+            calm = True
+            self.grabbing = True
         if calm:
             slot1 = me["weapons"][1]
             have = {wp["kind"] for wp in me["weapons"] if wp}
@@ -551,7 +558,7 @@ class Brain:
             mag = 1.0
             boost = need > walk and me["energy"] > 35
         else:
-            mag = 1.0 if (cube_rush or (FAST and not getattr(self, "ffa", False))) else sneak
+            mag = 1.0 if (cube_rush or getattr(self, "grabbing", False) or (FAST and not getattr(self, "ffa", False))) else sneak
             if DUEL and getattr(self, "duel_heal", False) and evade_from is None and not cube_rush:
                 mag = 0.0      # heal to full: stand still and let regen work
         mv = self.nav_vector(pos, goal)
@@ -582,7 +589,7 @@ class Brain:
         if zone_urgent and target is not None:
             mag = 1.0
             boost = me["energy"] > 15
-        if target is not None and not zone_urgent:
+        if target is not None and not zone_urgent and not (getattr(self, "grabbing", False) and loot_goal is not None):
             dvec = (target["pos"][0] - pos[0], target["pos"][1] - pos[1])
             dd = math.hypot(*dvec) or 1.0
             perp = (-dvec[1] / dd, dvec[0] / dd)
